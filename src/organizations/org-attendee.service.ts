@@ -1,4 +1,5 @@
-﻿/* eslint-disable @typescript-eslint/no-unsafe-member-access */
+﻿/* eslint-disable @typescript-eslint/no-redundant-type-constituents */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import {
   Injectable,
@@ -15,6 +16,109 @@ export class OrgAttendeeService {
     @InjectModel(OrgAttendee.name)
     private readonly orgAttendeeModel: Model<OrgAttendee>,
   ) {}
+
+  /**
+   * Registro avanzado:
+   * - Siempre trabaja con registrationData (formData completo)
+   * - Si viene attendeeId → actualiza ese registro (validando organización)
+   * - Si no viene attendeeId → upsert por (organizationId + email)
+   */
+  async registerAdvanced(
+    organizationId: string,
+    payload: {
+      attendeeId?: string;
+      email: string;
+      name?: string;
+      phone?: string;
+      formData: Record<string, any>;
+      firebaseUID?: string;
+      metadata?: Record<string, any>;
+    },
+  ) {
+    const { attendeeId, email, name, phone, formData, metadata } = payload;
+
+    if (!email) {
+      throw new BadRequestException('Email is required');
+    }
+
+    let attendee: any | null = null;
+
+    // 1) Si viene attendeeId → usarlo como fuente de verdad
+    if (attendeeId) {
+      attendee = await this.orgAttendeeModel.findById(attendeeId).lean();
+
+      if (!attendee) {
+        throw new NotFoundException('Attendee not found');
+      }
+
+      if (attendee.organizationId.toString() !== organizationId.toString()) {
+        throw new BadRequestException(
+          'Attendee does not belong to this organization',
+        );
+      }
+    } else {
+      // 2) Si no hay attendeeId → buscar por email + org
+      attendee = await this.orgAttendeeModel
+        .findOne({ organizationId, email })
+        .lean();
+    }
+
+    if (attendee) {
+      // UPDATE: merge de registrationData existente con el nuevo
+      const newRegistrationData = {
+        ...(attendee.registrationData || {}),
+        ...(formData || {}),
+      };
+
+      const updatePayload: any = {
+        registrationData: newRegistrationData,
+        updatedAt: new Date(),
+      };
+
+      if (name) updatePayload.name = name;
+      if (email) updatePayload.email = email;
+      if (phone) updatePayload.phone = phone;
+      if (metadata)
+        updatePayload.metadata = { ...(attendee.metadata || {}), ...metadata };
+
+      const updated = await this.orgAttendeeModel
+        .findByIdAndUpdate(attendee._id, updatePayload, { new: true })
+        .lean();
+
+      if (!updated) {
+        throw new NotFoundException('Failed to update attendee');
+      }
+
+      return updated;
+    }
+
+    // 3) CREATE: no había attendee previo
+    try {
+      const newAttendee = new this.orgAttendeeModel({
+        organizationId,
+        name: name || formData?.name || '',
+        email,
+        phone,
+        registrationData: formData || {},
+        metadata: metadata || {},
+        isActive: true,
+        registeredAt: new Date(),
+        createdAt: new Date(),
+      });
+
+      const saved = await newAttendee.save();
+      return saved.toObject();
+    } catch (error: any) {
+      if (error.code === 11000) {
+        throw new BadRequestException(
+          'Email already registered in this organization',
+        );
+      }
+      throw new BadRequestException(
+        'Error creating OrgAttendee: ' + (error.message || 'Unknown error'),
+      );
+    }
+  }
 
   async findByEmailAndOrg(email: string, organizationId: string): Promise<any> {
     return await this.orgAttendeeModel
@@ -159,6 +263,91 @@ export class OrgAttendeeService {
     return {
       totalAttendees,
       recentRegistrations, // Registros nuevos en los últimos 30 días
+    };
+  }
+
+  async bulkImport(
+    organizationId: string,
+    rows: {
+      identifierValues: Record<string, any>;
+      registrationData: Record<string, any>;
+      name?: string;
+      email?: string;
+      phone?: string;
+    }[],
+  ) {
+    let created = 0;
+    let updated = 0;
+    const errors: { rowIndex: number; error: string }[] = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+
+      try {
+        let attendee: any | null = null;
+
+        // 1) Intentar por identificadores del registrationForm
+        if (
+          row.identifierValues &&
+          Object.keys(row.identifierValues).length > 0
+        ) {
+          attendee = await this.findByIdentifiers(
+            organizationId,
+            row.identifierValues,
+          );
+        }
+
+        // 2) Fallback: buscar por email si no se encontró y hay email
+        if (!attendee && row.email) {
+          attendee = await this.findByEmailAndOrg(row.email, organizationId);
+        }
+
+        if (attendee) {
+          // UPDATE: merge de registrationData
+          const newRegistrationData = {
+            ...(attendee.registrationData || {}),
+            ...(row.registrationData || {}),
+          };
+
+          const updatePayload: any = {
+            registrationData: newRegistrationData,
+          };
+
+          if (row.name) updatePayload.name = row.name;
+          if (row.email) updatePayload.email = row.email;
+          if (row.phone) updatePayload.phone = row.phone;
+
+          await this.orgAttendeeModel
+            .findByIdAndUpdate(attendee._id, updatePayload, { new: true })
+            .lean();
+
+          updated++;
+        } else {
+          // CREATE
+          const newAttendee = new this.orgAttendeeModel({
+            organizationId,
+            name: row.name || row.registrationData?.name || '',
+            email: row.email || row.registrationData?.email || '',
+            phone: row.phone,
+            registrationData: row.registrationData || {},
+            registeredAt: new Date(),
+          });
+
+          await newAttendee.save();
+          created++;
+        }
+      } catch (e: any) {
+        errors.push({
+          rowIndex: i,
+          error: e?.message || 'Unknown error',
+        });
+      }
+    }
+
+    return {
+      created,
+      updated,
+      errors,
     };
   }
 }

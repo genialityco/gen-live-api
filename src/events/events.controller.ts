@@ -64,6 +64,18 @@ export class EventsController {
     return await this.svc.isUserRegisteredToEvent(eventId, email);
   }
 
+  // Verifica registro en una organización por campos identificadores (público)
+  @Post('org/:orgId/check-registration-by-identifiers')
+  async checkOrgRegistrationByIdentifiers(
+    @Param('orgId') orgId: string,
+    @Body() body: { identifierFields: Record<string, any> },
+  ) {
+    return await this.svc.checkOrgRegistrationByIdentifiers(
+      orgId,
+      body.identifierFields,
+    );
+  }
+
   // Verifica registro y devuelve datos del attendee usando campos identificadores
   @Post(':eventId/check-registration-by-identifiers')
   async checkRegistrationByIdentifiers(

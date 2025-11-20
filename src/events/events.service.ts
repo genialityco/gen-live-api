@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-base-to-string */
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
@@ -371,6 +372,58 @@ export class EventsService implements OnModuleInit {
     }
 
     return !!eventUser;
+  }
+
+  /**
+   * Verifica registro en una organización usando campos identificadores
+   * (sin necesidad de eventId)
+   */
+  async checkOrgRegistrationByIdentifiers(
+    organizationId: string,
+    identifierFields: Record<string, any>,
+  ) {
+    console.log(
+      `🔍 Checking ORG registration by identifiers for orgId: ${organizationId}`,
+      identifierFields,
+    );
+
+    // Validar orgId como ObjectId
+    let orgObjectId: Types.ObjectId;
+    try {
+      orgObjectId = new Types.ObjectId(organizationId);
+    } catch (error) {
+      throw new BadRequestException('Invalid organizationId');
+    }
+
+    // Construir query base
+    const query: any = { organizationId: orgObjectId };
+
+    // Importante: si el campo es "email", buscamos en el root.
+    // Para otros campos, buscamos en registrationData.campo
+    Object.entries(identifierFields).forEach(([fieldName, value]) => {
+      if (fieldName === 'email') {
+        query.email = value;
+      } else {
+        query[`registrationData.${fieldName}`] = value;
+      }
+    });
+
+    const orgAttendee = await this.orgAttendeeModel.findOne(query).lean();
+
+    if (!orgAttendee) {
+      console.log('❌ OrgAttendee not found in ORG with identifiers');
+      return {
+        found: false,
+        message: 'No registration found for this organization',
+      };
+    }
+
+    console.log('✅ OrgAttendee found in ORG:', orgAttendee._id);
+
+    return {
+      found: true,
+      orgAttendee,
+    };
   }
 
   /**

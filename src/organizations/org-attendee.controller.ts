@@ -9,10 +9,37 @@
   HttpCode,
 } from '@nestjs/common';
 import { OrgAttendeeService } from './org-attendee.service';
+import { BulkImportDto } from './dtos/bulk-import.dto';
 
 @Controller('org-attendees')
 export class OrgAttendeeController {
   constructor(private readonly orgAttendeeService: OrgAttendeeService) {}
+
+  @Post('advanced-register')
+  @HttpCode(HttpStatus.OK)
+  async advancedRegister(
+    @Body()
+    body: {
+      organizationId: string;
+      attendeeId?: string;
+      email: string;
+      name?: string;
+      phone?: string;
+      formData: Record<string, any>;
+      firebaseUID?: string;
+      metadata?: Record<string, any>;
+    },
+  ) {
+    return await this.orgAttendeeService.registerAdvanced(body.organizationId, {
+      attendeeId: body.attendeeId,
+      email: body.email,
+      name: body.name,
+      phone: body.phone,
+      formData: body.formData,
+      firebaseUID: body.firebaseUID,
+      metadata: body.metadata,
+    });
+  }
 
   @Get('by-email/:email/org/:organizationId')
   async findByEmailAndOrg(
@@ -74,5 +101,11 @@ export class OrgAttendeeController {
   @Get('stats/:organizationId')
   async getOrganizationStats(@Param('organizationId') organizationId: string) {
     return await this.orgAttendeeService.getOrganizationStats(organizationId);
+  }
+
+  @Post('bulk-import')
+  @HttpCode(HttpStatus.OK)
+  async bulkImport(@Body() body: BulkImportDto) {
+    return this.orgAttendeeService.bulkImport(body.organizationId, body.rows);
   }
 }
