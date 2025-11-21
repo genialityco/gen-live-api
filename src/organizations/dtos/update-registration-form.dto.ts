@@ -18,8 +18,8 @@ class FormFieldOptionDto {
 
 class ConditionalRuleDto {
   @IsString() field: string;
-  @IsIn(['equals', 'notEquals', 'contains', 'greaterThan', 'lessThan'])
-  operator: 'equals' | 'notEquals' | 'contains' | 'greaterThan' | 'lessThan';
+  @IsIn(['equals', 'notEquals', 'contains', 'notContains'])
+  operator: 'equals' | 'notEquals' | 'contains' | 'notContains';
   @IsDefined() // Asegura que el campo se preserve durante la validación (acepta cualquier tipo)
   value: any;
 }

@@ -53,9 +53,9 @@ export interface FormFieldOption {
 }
 
 export interface ConditionalRule {
-  field: string; // ID del campo a evaluar
-  operator: 'equals' | 'notEquals' | 'contains' | 'greaterThan' | 'lessThan';
-  value: any; // Valor a comparar
+  field: string;
+  operator: 'equals' | 'notEquals' | 'contains' | 'notContains';
+  value: any;
 }
 
 export interface ConditionalLogic {
