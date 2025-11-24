@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-base-to-string */
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
@@ -14,6 +15,7 @@ import { Model, Types } from 'mongoose';
 import { Event, EventDocument } from './schemas/event.schema';
 import { EventUser } from './schemas/event-user.schema';
 import {
+  FormFieldType,
   Organization,
   OrganizationDocument,
 } from '../organizations/schemas/organization.schema';
@@ -24,6 +26,39 @@ import { RtdbPresenceWatcherService } from '../rtdb/rtdb-presence-watcher.servic
 import { RegisterToEventDto } from './dtos/register-to-event.dto';
 import { UpdateEventBrandingDto } from './dtos/update-event-branding.dto';
 import { ViewingMetricsService } from './viewing-metrics.service.v2';
+
+function normalizeByType(value: any, type: FormFieldType | undefined) {
+  if (value === null || value === undefined) return value;
+
+  switch (type) {
+    case 'text':
+    case 'email':
+    case 'tel':
+    case 'textarea':
+    case 'select':
+      return String(value).trim();
+
+    case 'number': {
+      if (typeof value === 'number') return value;
+      const n = Number(value);
+      return Number.isNaN(n) ? value : n;
+    }
+
+    case 'checkbox': {
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'number') return value !== 0;
+      if (typeof value === 'string') {
+        const v = value.trim().toLowerCase();
+        if (['true', '1', 'on', 'sí', 'si', 'yes'].includes(v)) return true;
+        if (['false', '0', 'off', 'no'].includes(v)) return false;
+      }
+      return value;
+    }
+
+    default:
+      return value;
+  }
+}
 
 @Injectable()
 export class EventsService implements OnModuleInit {
@@ -387,42 +422,174 @@ export class EventsService implements OnModuleInit {
       identifierFields,
     );
 
-    // Validar orgId como ObjectId
+    // --- Validar orgId ---
     let orgObjectId: Types.ObjectId;
     try {
       orgObjectId = new Types.ObjectId(organizationId);
-    } catch (error) {
+    } catch {
       throw new BadRequestException('Invalid organizationId');
     }
 
-    // Construir query base
-    const query: any = { organizationId: orgObjectId };
+    // --- Cargar organización y su registrationForm ---
+    const org = await this.orgModel
+      .findById(orgObjectId)
+      .lean<Organization>()
+      .exec();
 
-    // Importante: si el campo es "email", buscamos en el root.
-    // Para otros campos, buscamos en registrationData.campo
-    Object.entries(identifierFields).forEach(([fieldName, value]) => {
-      if (fieldName === 'email') {
-        query.email = value;
+    if (!org) {
+      throw new BadRequestException('Organization not found');
+    }
+
+    const registrationForm = org.registrationForm;
+    const fields = registrationForm?.fields ?? [];
+
+    // Mapa: fieldId -> FormField
+    const fieldConfigMap = new Map<
+      string,
+      { type: FormFieldType; isIdentifier: boolean }
+    >();
+    for (const f of fields) {
+      if (f.isIdentifier) {
+        fieldConfigMap.set(f.id, { type: f.type, isIdentifier: true });
+      }
+    }
+
+    // --- Validar estructura básica y normalizar ---
+    const identifierEntries = Object.entries(identifierFields);
+
+    const normalizedEntries = identifierEntries.map(([fieldId, raw]) => {
+      const cfg = fieldConfigMap.get(fieldId);
+
+      if (!cfg) {
+        // Opcional: podrías lanzar error si te mandan un identificador desconocido
+        console.warn(
+          `⚠️ Field "${fieldId}" no está marcado como isIdentifier en registrationForm`,
+        );
+      }
+
+      if (raw === undefined || raw === null || raw === '') {
+        throw new BadRequestException(`Missing or empty field: ${fieldId}`);
+      }
+
+      if (fieldId === 'email') {
+        const v = String(raw).trim();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) {
+          throw new BadRequestException(`Invalid email format: ${v}`);
+        }
+      }
+
+      const norm = normalizeByType(raw, cfg?.type);
+      return [fieldId, norm] as [string, any];
+    });
+
+    // --- Query completo con TODOS los identificadores ---
+    const fullQuery: any = { organizationId: orgObjectId };
+    normalizedEntries.forEach(([fieldId, value]) => {
+      // Regla: si el id es "email" lo buscamos en root,
+      // lo demás va en registrationData
+      if (fieldId === 'email') {
+        fullQuery.email = value;
       } else {
-        query[`registrationData.${fieldName}`] = value;
+        fullQuery[`registrationData.${fieldId}`] = value;
       }
     });
 
-    const orgAttendee = await this.orgAttendeeModel.findOne(query).lean();
+    console.log('Full query for orgAttendee:', fullQuery);
 
-    if (!orgAttendee) {
-      console.log('❌ OrgAttendee not found in ORG with identifiers');
+    const orgAttendee = await this.orgAttendeeModel.findOne(fullQuery).lean();
+
+    // ✅ Caso 1: todos los campos coinciden
+    if (orgAttendee) {
       return {
-        found: false,
-        message: 'No registration found for this organization',
+        found: true,
+        orgAttendee,
       };
     }
 
-    console.log('✅ OrgAttendee found in ORG:', orgAttendee._id);
+    // ===================== COINCIDENCIAS PARCIALES =====================
+    if (normalizedEntries.length === 0) {
+      return {
+        found: false,
+        reason: 'USER_NOT_FOUND',
+        message: 'No user registered with this organization',
+      };
+    }
+
+    // $or con TODOS los identificadores normalizados
+    const orConditions = normalizedEntries.map(([fieldId, value]) => {
+      if (fieldId === 'email') return { email: value };
+      return { [`registrationData.${fieldId}`]: value };
+    });
+
+    const candidates = await this.orgAttendeeModel
+      .find({
+        organizationId: orgObjectId,
+        $or: orConditions,
+      })
+      .lean();
+
+    // ❌ Ningún registro coincide con ningún identificador
+    if (!candidates || candidates.length === 0) {
+      return {
+        found: false,
+        reason: 'USER_NOT_FOUND',
+        message: 'No user registered with this organization',
+      };
+    }
+
+    // Elegimos el candidato con MÁS coincidencias
+    let bestCandidate: any = null;
+    let bestScore = 0;
+
+    for (const candidate of candidates) {
+      let score = 0;
+
+      for (const [fieldId, value] of normalizedEntries) {
+        const candidateVal =
+          fieldId === 'email'
+            ? candidate.email
+            : candidate.registrationData?.[fieldId];
+
+        if (candidateVal === value) {
+          score++;
+        }
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestCandidate = candidate;
+      }
+    }
+
+    if (!bestCandidate || bestScore === 0) {
+      return {
+        found: false,
+        reason: 'USER_NOT_FOUND',
+        message: 'No user registered with this organization',
+      };
+    }
+
+    // Campos que NO coinciden para el mejor candidato
+    const mismatched: string[] = [];
+    for (const [fieldId, value] of normalizedEntries) {
+      const candidateVal =
+        fieldId === 'email'
+          ? bestCandidate.email
+          : bestCandidate.registrationData?.[fieldId];
+
+      if (candidateVal !== value) {
+        mismatched.push(fieldId);
+      }
+    }
 
     return {
-      found: true,
-      orgAttendee,
+      found: false,
+      reason: 'INVALID_FIELDS',
+      message:
+        mismatched.length > 0
+          ? `Some fields do not match: ${mismatched.join(', ')}`
+          : 'Some fields do not match our records',
+      mismatched,
     };
   }
 
