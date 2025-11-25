@@ -606,40 +606,43 @@ export class EventsService implements OnModuleInit {
       identifierFields,
     );
 
-    // 1. Obtener el evento y su organizationId
+    // 1. Obtener el evento
     const event = await this.model.findById(eventId).lean();
     if (!event) {
       throw new NotFoundException('Event not found');
     }
 
-    // 2. Buscar OrgAttendee usando los campos identificadores
-    const query: any = { organizationId: event.orgId };
-    Object.entries(identifierFields).forEach(([fieldName, value]) => {
-      query[`registrationData.${fieldName}`] = value;
-    });
+    // 2. Reutilizar la lógica de ORG para encontrar el OrgAttendee
+    //    Nota: checkOrgRegistrationByIdentifiers espera organizationId como string
+    const orgResult = await this.checkOrgRegistrationByIdentifiers(
+      event.orgId.toString(),
+      identifierFields,
+    );
 
-    const orgAttendee = await this.orgAttendeeModel.findOne(query).lean();
-
-    if (!orgAttendee) {
-      console.log('❌ OrgAttendee not found with identifiers');
+    // 🔹 No se encontró ningún OrgAttendee válido
+    if (!orgResult || !orgResult.found || !orgResult.orgAttendee) {
       return {
         isRegistered: false,
-        message: 'No registration found for this organization',
+        status: orgResult?.reason ?? 'USER_NOT_FOUND',
+        message:
+          orgResult?.message ?? 'No registration found for this organization',
       };
     }
 
-    console.log('✅ OrgAttendee found:', orgAttendee._id);
+    const orgAttendee = orgResult.orgAttendee;
+    console.log('✅ OrgAttendee found via ORG check:', orgAttendee._id);
 
-    // 3. Verificar si existe EventUser para este evento
+    // 3. Verificar si ya existe EventUser para este evento
     const eventUser = await this.eventUserModel
       .findOne({ eventId, attendeeId: orgAttendee._id })
       .lean();
 
     if (!eventUser) {
-      console.log('⚠️  OrgAttendee exists but not registered to this event');
+      console.log('⚠️ OrgAttendee exists but not registered to this event');
       return {
         isRegistered: false,
-        orgAttendee: orgAttendee,
+        status: 'ORG_ONLY', // 👈 clave para el frontend
+        orgAttendee,
         message:
           'User found in organization but not registered to this specific event',
       };
@@ -648,8 +651,9 @@ export class EventsService implements OnModuleInit {
     console.log('✅ EventUser found - User is registered to this event');
     return {
       isRegistered: true,
-      orgAttendee: orgAttendee,
-      eventUser: eventUser,
+      status: 'EVENT_REGISTERED',
+      orgAttendee,
+      eventUser,
     };
   }
 
