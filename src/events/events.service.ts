@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-floating-promises */
+/* eslint-disable @typescript-eslint/restrict-template-expressions */
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-base-to-string */
@@ -81,10 +83,6 @@ export class EventsService implements OnModuleInit {
    * Inicializar watchers para eventos que ya están en live cuando el servidor inicia
    */
   async onModuleInit() {
-    this.logger.log(
-      '🔍 Checking for live events to activate presence watchers...',
-    );
-
     try {
       const liveEvents = await this.model.find({ status: 'live' }).lean();
 
@@ -93,18 +91,9 @@ export class EventsService implements OnModuleInit {
         return;
       }
 
-      this.logger.log(
-        `🎯 Found ${liveEvents.length} live events, activating watchers...`,
-      );
-
       for (const event of liveEvents) {
         await this.watcher.watch(event._id.toString());
-        this.logger.log(
-          `✅ Watcher activated for live event: ${event.title} (${event._id})`,
-        );
       }
-
-      this.logger.log('🚀 All presence watchers activated successfully');
     } catch (error) {
       this.logger.error('❌ Error activating presence watchers:', error);
     }
@@ -291,10 +280,6 @@ export class EventsService implements OnModuleInit {
     // 2. Crear EventUser (solo inscripción al evento, sin duplicar datos)
     const attendeeObjectId = new Types.ObjectId(attendee._id.toString());
 
-    console.log(
-      `🎯 Creating EventUser for eventId: ${eventId}, email: ${dto.email}, attendeeId: ${attendeeObjectId.toString()}`,
-    );
-
     // Preparar los datos del EventUser
     const eventUserData: any = {
       eventId,
@@ -308,9 +293,6 @@ export class EventsService implements OnModuleInit {
     if (dto.firebaseUID) {
       eventUserData.firebaseUID = dto.firebaseUID;
       eventUserData.lastLoginAt = new Date();
-      console.log(
-        `🔗 Including Firebase UID: ${dto.firebaseUID} in EventUser creation`,
-      );
     }
 
     const eventUser = await this.eventUserModel
@@ -322,14 +304,6 @@ export class EventsService implements OnModuleInit {
       .populate('attendeeId')
       .lean();
 
-    console.log(`✅ EventUser created/updated:`, {
-      _id: eventUser._id,
-      eventId: eventUser.eventId,
-      attendeeId: eventUser.attendeeId,
-      firebaseUID: eventUser.firebaseUID || 'NOT_SET',
-      status: eventUser.status,
-    });
-
     return { attendee, eventUser };
   }
 
@@ -340,10 +314,6 @@ export class EventsService implements OnModuleInit {
     eventId: string,
     email: string,
   ): Promise<{ isRegistered: boolean; orgAttendee?: any; eventUser?: any }> {
-    console.log(
-      `🔍 Checking registration for eventId: ${eventId}, email: ${email}`,
-    );
-
     // First find the OrgAttendee by email
     const event = await this.model.findById(eventId).lean();
     if (!event) return { isRegistered: false };
@@ -362,17 +332,6 @@ export class EventsService implements OnModuleInit {
       .findOne({ eventId, attendeeId: attendee._id })
       .lean();
 
-    console.log(`📋 EventUser found:`, eventUser ? 'YES' : 'NO');
-    if (eventUser) {
-      console.log(`✅ EventUser details:`, {
-        _id: eventUser._id,
-        eventId: eventUser.eventId,
-        attendeeId: eventUser.attendeeId,
-        status: eventUser.status,
-        registeredAt: eventUser.registeredAt,
-      });
-    }
-
     return {
       isRegistered: !!eventUser,
       orgAttendee: attendee,
@@ -387,24 +346,9 @@ export class EventsService implements OnModuleInit {
     eventId: string,
     firebaseUID: string,
   ): Promise<boolean> {
-    console.log(
-      `🔍 Checking registration by UID for eventId: ${eventId}, firebaseUID: ${firebaseUID}`,
-    );
-
     const eventUser = await this.eventUserModel
       .findOne({ eventId, firebaseUID })
       .lean();
-
-    console.log(`📋 EventUser found by UID:`, eventUser ? 'YES' : 'NO');
-    if (eventUser) {
-      console.log(`✅ EventUser details:`, {
-        _id: eventUser._id,
-        eventId: eventUser.eventId,
-        attendeeId: eventUser.attendeeId,
-        firebaseUID: eventUser.firebaseUID,
-        status: eventUser.status,
-      });
-    }
 
     return !!eventUser;
   }
@@ -417,11 +361,6 @@ export class EventsService implements OnModuleInit {
     organizationId: string,
     identifierFields: Record<string, any>,
   ) {
-    console.log(
-      `🔍 Checking ORG registration by identifiers for orgId: ${organizationId}`,
-      identifierFields,
-    );
-
     // --- Validar orgId ---
     let orgObjectId: Types.ObjectId;
     try {
@@ -493,8 +432,6 @@ export class EventsService implements OnModuleInit {
         fullQuery[`registrationData.${fieldId}`] = value;
       }
     });
-
-    console.log('Full query for orgAttendee:', fullQuery);
 
     const orgAttendee = await this.orgAttendeeModel.findOne(fullQuery).lean();
 
@@ -601,11 +538,6 @@ export class EventsService implements OnModuleInit {
     eventId: string,
     identifierFields: Record<string, any>,
   ) {
-    console.log(
-      `🔍 Checking registration by identifiers for eventId: ${eventId}`,
-      identifierFields,
-    );
-
     // 1. Obtener el evento
     const event = await this.model.findById(eventId).lean();
     if (!event) {
@@ -630,7 +562,6 @@ export class EventsService implements OnModuleInit {
     }
 
     const orgAttendee = orgResult.orgAttendee;
-    console.log('✅ OrgAttendee found via ORG check:', orgAttendee._id);
 
     // 3. Verificar si ya existe EventUser para este evento
     const eventUser = await this.eventUserModel
@@ -638,7 +569,6 @@ export class EventsService implements OnModuleInit {
       .lean();
 
     if (!eventUser) {
-      console.log('⚠️ OrgAttendee exists but not registered to this event');
       return {
         isRegistered: false,
         status: 'ORG_ONLY', // 👈 clave para el frontend
@@ -648,7 +578,6 @@ export class EventsService implements OnModuleInit {
       };
     }
 
-    console.log('✅ EventUser found - User is registered to this event');
     return {
       isRegistered: true,
       status: 'EVENT_REGISTERED',
@@ -666,10 +595,6 @@ export class EventsService implements OnModuleInit {
     email: string,
     firebaseUID: string,
   ) {
-    console.log(
-      `🔗 Associating Firebase UID ${firebaseUID} with email ${email} for event ${eventId}`,
-    );
-
     // First find the event to get the organization
     const event = await this.model.findById(eventId).lean();
     if (!event) {
@@ -685,16 +610,10 @@ export class EventsService implements OnModuleInit {
       .lean();
 
     if (!attendee) {
-      console.log(
-        `❌ OrgAttendee not found for email: ${email}, orgId: ${event.orgId.toString()}`,
-      );
       throw new NotFoundException('Attendee not found');
     }
 
     // Update EventUser with Firebase UID
-    console.log(
-      `🔍 Looking for EventUser with attendeeId: ${attendee._id.toString()}, eventId: ${eventId}`,
-    );
 
     const eventUser = await this.eventUserModel.findOneAndUpdate(
       {
@@ -709,30 +628,11 @@ export class EventsService implements OnModuleInit {
     );
 
     if (!eventUser) {
-      console.log(
-        `❌ EventUser not found for attendeeId: ${attendee._id.toString()}, eventId: ${eventId}`,
-      );
-
       // Let's debug by checking what EventUsers exist for this event
       const allEventUsers = await this.eventUserModel.find({ eventId }).lean();
-      console.log(
-        `🔍 All EventUsers for eventId ${eventId}:`,
-        allEventUsers.map((eu) => ({
-          _id: eu._id,
-          attendeeId: eu.attendeeId,
-          firebaseUID: eu.firebaseUID,
-        })),
-      );
 
       throw new NotFoundException('EventUser not found');
     }
-
-    console.log(`✅ Associated Firebase UID with EventUser:`, {
-      _id: eventUser._id,
-      attendeeId: eventUser.attendeeId,
-      firebaseUID: eventUser.firebaseUID,
-      lastLoginAt: eventUser.lastLoginAt,
-    });
 
     return { success: true, eventUser };
   }
@@ -933,13 +833,7 @@ export class EventsService implements OnModuleInit {
 
     // Si el email cambió, actualizar todos los EventUser relacionados
     if (newEmail && newEmail !== currentAttendee.email) {
-      console.log(
-        `📧 Updating email in EventUsers from ${currentAttendee.email} to ${newEmail} for attendeeId: ${attendeeId}`,
-      );
-
       await this.eventUserModel.updateMany({ attendeeId }, { email: newEmail });
-
-      console.log(`✅ Updated EventUsers with new email: ${newEmail}`);
     }
 
     return attendee;

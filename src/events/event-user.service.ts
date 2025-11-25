@@ -4,7 +4,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { EventUser } from './schemas/event-user.schema';
 import { OrgAttendee } from '../organizations/schemas/org-attendee.schema';
 import { UserAccount } from '../users/schemas/user-account.schema';
@@ -167,8 +167,15 @@ export class EventUserService {
 
   // Marcar como asistido
   async markAsAttended(attendeeId: string, eventId: string) {
+    console.log('[markAsAttended] raw args:', { attendeeId, eventId });
+
+    const filter = {
+      attendeeId: new Types.ObjectId(attendeeId),
+      eventId: String(eventId),
+    };
+
     const eventUser = await this.eventUserModel.findOneAndUpdate(
-      { attendeeId, eventId },
+      filter,
       {
         status: 'attended',
         attendedAt: new Date(),
@@ -179,6 +186,10 @@ export class EventUserService {
     );
 
     if (!eventUser) {
+      // Extra debug: ver qué hay por attendeeId o por eventId
+      await this.eventUserModel.find({ attendeeId: filter.attendeeId }).lean();
+      await this.eventUserModel.find({ eventId: filter.eventId }).lean();
+
       throw new NotFoundException(
         `EventUser not found for attendee ${attendeeId} and event ${eventId}`,
       );

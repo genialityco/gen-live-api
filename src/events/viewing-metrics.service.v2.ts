@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-base-to-string */
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -43,10 +44,6 @@ export class ViewingMetricsService {
     eventId: string,
     presenceData: Record<string, { on: boolean; ts: number }>,
   ) {
-    this.logger.debug(`Presence change for event ${eventId}`, {
-      totalUIDs: Object.keys(presenceData).length,
-    });
-
     const event = await this.eventModel.findById(eventId).lean();
     if (!event) {
       this.logger.warn(`Event ${eventId} not found`);
@@ -92,9 +89,6 @@ export class ViewingMetricsService {
           liveWatchTimeSeconds: 0,
           wasLiveDuringSession: isLive,
         });
-        this.logger.log(
-          `Created viewing session for EventUser ${eventUser._id}`,
-        );
       } else {
         // Actualizar sesión existente
         const timeSinceLastHeartbeat = Math.floor(
@@ -142,9 +136,6 @@ export class ViewingMetricsService {
 
     if (activeFirebaseUIDs.length > 0) {
       // Hay usuarios activos en RTDB
-      this.logger.debug(
-        `📊 Counting from RTDB: ${activeFirebaseUIDs.length} active UIDs`,
-      );
 
       const eventUsers = await this.eventUserModel
         .find({
@@ -157,7 +148,6 @@ export class ViewingMetricsService {
     } else {
       // Array vacío = No hay usuarios activos en RTDB
       // Esto es correcto, no buscar en ViewingSessions
-      this.logger.debug('📊 No active UIDs from RTDB - concurrent count: 0');
       uniqueEventUsers = new Set();
     }
 
@@ -181,9 +171,6 @@ export class ViewingMetricsService {
       // Actualizar pico si es necesario
       if (currentConcurrent > metrics.peakConcurrentViewers) {
         metrics.peakConcurrentViewers = currentConcurrent;
-        this.logger.log(
-          `🔥 New peak concurrent viewers for event ${eventId}: ${currentConcurrent}`,
-        );
       }
     }
 
@@ -193,19 +180,11 @@ export class ViewingMetricsService {
     await this.rtdbService.setNowCount(eventId, currentConcurrent);
 
     // Publicar métricas simplificadas en tiempo real
-    this.logger.log({
-      totalUniqueViewers: metrics.totalUniqueViewers,
-      peakConcurrentViewers: metrics.peakConcurrentViewers,
-      currentConcurrent: currentConcurrent,
-    });
-
     await this.rtdbService.publishMetrics(eventId, {
       currentConcurrentViewers: currentConcurrent,
       peakConcurrentViewers: metrics.peakConcurrentViewers,
       totalUniqueViewers: metrics.totalUniqueViewers,
     });
-
-    this.logger.debug(`✅ Metrics published to RTDB for event ${eventId}`);
 
     return {
       currentConcurrent,
@@ -243,7 +222,6 @@ export class ViewingMetricsService {
       }
 
       await session.save();
-      this.logger.log(`Ended viewing session for UID ${firebaseUID}`);
 
       // Recalcular concurrentes
       await this.updateConcurrentViewers(eventId);
@@ -285,12 +263,6 @@ export class ViewingMetricsService {
     metrics.lastUpdate = new Date();
 
     await metrics.save();
-
-    this.logger.log(`Calculated metrics for event ${eventId}`, {
-      totalUniqueViewers: metrics.totalUniqueViewers,
-      peakConcurrentViewers: metrics.peakConcurrentViewers,
-      currentConcurrent: metrics.currentConcurrentViewers,
-    });
 
     // Publicar métricas simplificadas a RTDB
     await this.rtdbService.publishMetrics(eventId, {
@@ -344,8 +316,6 @@ export class ViewingMetricsService {
       session.endedAt = session.lastHeartbeat; // Marcar como terminada en el último heartbeat
       await session.save();
     }
-
-    this.logger.log(`Cleaned up ${staleSessions.length} stale sessions`);
 
     return { cleaned: staleSessions.length };
   }
