@@ -558,6 +558,7 @@ export class EventsService implements OnModuleInit {
         status: orgResult?.reason ?? 'USER_NOT_FOUND',
         message:
           orgResult?.message ?? 'No registration found for this organization',
+        mismatched: orgResult?.mismatched ?? [],
       };
     }
 
@@ -571,7 +572,7 @@ export class EventsService implements OnModuleInit {
     if (!eventUser) {
       return {
         isRegistered: false,
-        status: 'ORG_ONLY', // 👈 clave para el frontend
+        status: 'ORG_ONLY',
         orgAttendee,
         message:
           'User found in organization but not registered to this specific event',

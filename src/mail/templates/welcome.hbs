@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Bienvenido a Gen-Live</title>
+  </head>
+  <body style="font-family: Arial, sans-serif; background: #f6f6f6; padding: 20px;">
+    <table width="100%" cellspacing="0" cellpadding="0">
+      <tr>
+        <td align="center">
+          <table width="600" cellspacing="0" cellpadding="20" style="background:#ffffff; border-radius:8px;">
+            <tr>
+              <td>
+                <h1>Hola {{name}} 👋</h1>
+                <p>
+                  Bienvenido a <strong>Gen-Live</strong>. Tu cuenta ha sido creada con el correo
+                  <strong>{{email}}</strong>.
+                </p>
+
+                {{#if verifyUrl}}
+                  <p>
+                    Para activar tu cuenta, haz clic aquí:
+                    <a href="{{verifyUrl}}">Activar cuenta</a>
+                  </p>
+                {{/if}}
+
+                <p style="margin-top: 24px;">
+                  ¡Gracias por confiar en nosotros!<br />
+                  El equipo de Gen-Live
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

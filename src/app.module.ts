@@ -13,6 +13,7 @@ import { PeopleModule } from './people/people.module';
 import { RegistrationsModule } from './registrations/registrations.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { UsersModule } from './users/users.module';
+import { MailModule } from './mail/mail.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { UsersModule } from './users/users.module';
     EventsModule,
     PublicModule,
     UsersModule,
+    MailModule,
   ],
   providers: [
     {

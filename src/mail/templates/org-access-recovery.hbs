@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Recupera tu acceso a {{orgName}}</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+                sans-serif;
+            background-color: #f5f5f7;
+            margin: 0;
+            padding: 0;
+        }
+
+        .wrapper {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 24px 16px 40px;
+        }
+
+        .card {
+            background-color: #ffffff;
+            border-radius: 12px;
+            padding: 24px 20px;
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+        }
+
+        h1 {
+            font-size: 20px;
+            margin: 0 0 8px;
+            color: #111827;
+        }
+
+        h2 {
+            font-size: 16px;
+            margin: 24px 0 8px;
+            color: #111827;
+        }
+
+        p {
+            font-size: 14px;
+            line-height: 1.5;
+            color: #4b5563;
+            margin: 0 0 8px;
+        }
+
+        .cta {
+            display: inline-block;
+            margin-top: 16px;
+            padding: 10px 18px;
+            background-color: #2563eb;
+            color: #ffffff !important;
+            text-decoration: none;
+            border-radius: 999px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .identifiers {
+            margin: 12px 0 4px;
+            padding: 0;
+            list-style: none;
+        }
+
+        .identifiers li {
+            font-size: 13px;
+            color: #111827;
+            padding: 4px 0;
+        }
+
+        .identifiers span {
+            color: #6b7280;
+        }
+
+        .footer {
+            margin-top: 16px;
+            font-size: 11px;
+            color: #9ca3af;
+        }
+
+        .divider {
+            height: 1px;
+            background: linear-gradient(to right,
+                    rgba(148, 163, 184, 0),
+                    rgba(148, 163, 184, 0.8),
+                    rgba(148, 163, 184, 0));
+            margin: 16px 0;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="wrapper">
+        <div class="card">
+            <h1>Recupera tu acceso a {{orgName}}</h1>
+
+            <p>
+                Recibimos una solicitud para ayudarte a recordar los datos con los que
+                te registraste en <strong>{{orgName}}</strong>.
+            </p>
+
+            {{#if identifierSummary}}
+            <p>Estos son algunos de los datos que tenemos asociados a tu cuenta:</p>
+            <ul class="identifiers">
+                {{#each identifierSummary}}
+                <li>
+                    <span>{{this.label}}:</span>
+                    {{this.value}}
+                </li>
+                {{/each}}
+            </ul>
+            {{/if}}
+
+            <div class="divider"></div>
+            {{#if accessUrl}}
+            <p>
+                Si quieres revisar o actualizar tu información, puedes ingresar de
+                nuevo a la organización desde el siguiente enlace:
+            </p>
+            <p>
+                <a class="cta" href="{{accessUrl}}" target="_blank" rel="noopener">
+                    Ir a mi acceso
+                </a>
+            </p>
+            {{else}}
+            <p>
+                Si quieres revisar o actualizar tu información, ingresa a la página
+                de la organización y utiliza tus datos para acceder.
+            </p>
+            {{/if}}
+
+
+
+            <p style="font-size: 12px; color: #6b7280; margin-top: 12px;">
+                Si tú no solicitaste esta ayuda, puedes ignorar este correo.
+            </p>
+
+            <div class="footer">
+                Este mensaje fue enviado automáticamente. Por favor no respondas a
+                este correo.
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

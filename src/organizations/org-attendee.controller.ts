@@ -1,4 +1,5 @@
-﻿import {
+﻿/* eslint-disable @typescript-eslint/no-unsafe-return */
+import {
   Controller,
   Get,
   Post,
@@ -107,5 +108,22 @@ export class OrgAttendeeController {
   @HttpCode(HttpStatus.OK)
   async bulkImport(@Body() body: BulkImportDto) {
     return this.orgAttendeeService.bulkImport(body.organizationId, body.rows);
+  }
+
+  @Post('recover-access')
+  @HttpCode(HttpStatus.OK)
+  async recoverAccess(
+    @Body()
+    body: {
+      organizationId: string;
+      identifierFields: Record<string, any>;
+      accessUrl?: string;
+    },
+  ) {
+    return this.orgAttendeeService.sendRecoveryEmailByIdentifiers(
+      body.organizationId,
+      body.identifierFields,
+      body.accessUrl,
+    );
   }
 }

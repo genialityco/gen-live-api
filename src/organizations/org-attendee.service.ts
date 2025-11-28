@@ -1,4 +1,7 @@
-﻿/* eslint-disable @typescript-eslint/no-redundant-type-constituents */
+﻿/* eslint-disable @typescript-eslint/no-unsafe-return */
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
+/* eslint-disable @typescript-eslint/no-unsafe-call */
+/* eslint-disable @typescript-eslint/no-redundant-type-constituents */
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import {
@@ -7,14 +10,19 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { OrgAttendee } from './schemas/org-attendee.schema';
+import { MailService } from 'src/mail/mail.service';
+import { Organization } from './schemas/organization.schema';
 
 @Injectable()
 export class OrgAttendeeService {
   constructor(
     @InjectModel(OrgAttendee.name)
     private readonly orgAttendeeModel: Model<OrgAttendee>,
+    private readonly mailService: MailService,
+    @InjectModel(Organization.name)
+    private readonly orgModel: Model<Organization>,
   ) {}
 
   /**
@@ -136,12 +144,24 @@ export class OrgAttendeeService {
     organizationId: string,
     identifierFields: Record<string, any>,
   ): Promise<any> {
-    // Construir query dinámico buscando en registrationData
     const query: any = { organizationId };
 
-    // Para cada campo identificador, buscar en registrationData
-    Object.entries(identifierFields).forEach(([fieldName, value]) => {
-      query[`registrationData.${fieldName}`] = value;
+    Object.entries(identifierFields).forEach(([fieldName, rawValue]) => {
+      if (
+        rawValue === undefined ||
+        rawValue === null ||
+        (typeof rawValue === 'string' && rawValue.trim() === '')
+      ) {
+        return;
+      }
+
+      const value = typeof rawValue === 'string' ? rawValue.trim() : rawValue;
+
+      if (fieldName === 'email') {
+        query.email = value;
+      } else {
+        query[`registrationData.${fieldName}`] = value;
+      }
     });
 
     console.log('🔍 Searching OrgAttendee with identifiers:', query);
@@ -349,5 +369,133 @@ export class OrgAttendeeService {
       updated,
       errors,
     };
+  }
+
+  /**
+   * Envía un correo de recuperación de acceso usando campos identificadores.
+   * No devuelve datos sensibles al cliente: sólo indica que, si existe registro,
+   * se enviará un correo con instrucciones.
+   */
+  async sendRecoveryEmailByIdentifiers(
+    organizationId: string,
+    identifierFields: Record<string, any>,
+    accessUrlOverride?: string,
+  ) {
+    // 1) Limpiar identificadores vacíos
+    const filteredEntries = Object.entries(identifierFields).filter(
+      ([, raw]) =>
+        raw !== undefined && raw !== null && String(raw).trim() !== '',
+    );
+
+    if (filteredEntries.length === 0) {
+      throw new BadRequestException(
+        'At least one identifier field is required',
+      );
+    }
+
+    const filteredIdentifiers = Object.fromEntries(filteredEntries);
+
+    // 2) Buscar attendee por identificadores
+    const attendee = await this.findByIdentifiers(
+      organizationId,
+      filteredIdentifiers,
+    );
+
+    // 🔒 Seguridad: siempre devolvemos un mensaje genérico
+    if (!attendee) {
+      return {
+        ok: true,
+        sent: false,
+        message:
+          'Si existe un registro asociado a estos datos, te enviaremos un correo con la información para acceder.',
+      };
+    }
+
+    // 3) Resolver email de destino
+    let targetEmail: string | null = null;
+
+    if (attendee.email && typeof attendee.email === 'string') {
+      targetEmail = attendee.email;
+    } else if (attendee.registrationData?.email_system) {
+      targetEmail = attendee.registrationData.email_system;
+    } else if (attendee.registrationData?.email) {
+      targetEmail = attendee.registrationData.email;
+    } else if (attendee.registrationData) {
+      for (const value of Object.values(attendee.registrationData)) {
+        if (typeof value === 'string' && value.includes('@')) {
+          targetEmail = value;
+          break;
+        }
+      }
+    }
+
+    if (!targetEmail) {
+      return {
+        ok: true,
+        sent: false,
+        message:
+          'Si existe un registro asociado a estos datos, te enviaremos un correo con la información para acceder.',
+      };
+    }
+
+    // 4) Cargar organización para obtener nombre, slug y registrationForm
+    const orgObjectId = new Types.ObjectId(organizationId);
+    const org = await this.orgModel
+      .findById(orgObjectId)
+      .lean<Organization>()
+      .exec();
+
+    const orgName = org?.name ?? 'tu organización';
+    const registrationForm = org?.registrationForm;
+    const fields = registrationForm?.fields ?? [];
+
+    // 5) Construir resumen de campos identificadores
+    const identifierFieldsConfig = fields.filter((f) => f.isIdentifier);
+
+    const identifierSummary: { label: string; value: string }[] = [];
+
+    for (const field of identifierFieldsConfig) {
+      const raw = attendee.registrationData?.[field.id];
+
+      if (raw === undefined || raw === null) continue;
+
+      const value = String(raw);
+
+      identifierSummary.push({
+        label: field.label ?? field.id,
+        value,
+      });
+    }
+
+    // 6) Enlace de acceso a la org (por ejemplo, modo update)
+    const cleanAccessUrl =
+      accessUrlOverride && String(accessUrlOverride).trim().length > 0
+        ? String(accessUrlOverride).trim()
+        : undefined; // 👈 puede ser undefined
+
+    // 7) Enviar correo usando MailService
+    try {
+      await this.mailService.sendOrgAccessRecoveryEmail({
+        to: targetEmail,
+        orgName,
+        identifierSummary,
+        accessUrl: cleanAccessUrl,
+      });
+
+      return {
+        ok: true,
+        sent: true,
+        message:
+          'Si existe un registro asociado a estos datos, te enviaremos un correo con la información para acceder.',
+      };
+    } catch (error) {
+      console.error('❌ Error sending recovery email:', error);
+      return {
+        ok: true,
+        sent: false,
+        message:
+          'Si existe un registro asociado a estos datos, te enviaremos un correo con la información para acceder.',
+      };
+    }
   }
 }
