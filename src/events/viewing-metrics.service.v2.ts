@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-base-to-string */
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -22,6 +24,14 @@ export class ViewingMetricsService {
   private readonly logger = new Logger(ViewingMetricsService.name);
   private readonly PRESENCE_TIMEOUT_SECONDS = 60; // Timeout para considerar desconectado
 
+  // Cache de UIDs que no tienen EventUser (para evitar queries repetidas y warnings)
+  private unknownUIDs = new Map<
+    string,
+    { eventId: string; lastWarned: number }
+  >();
+  private readonly UNKNOWN_UID_WARNING_COOLDOWN = 5 * 60 * 1000; // 5 minutos entre warnings
+  private readonly UNKNOWN_UID_CACHE_TTL = 30 * 60 * 1000; // 30 minutos de caché
+
   constructor(
     @InjectModel(ViewingSession.name)
     private viewingSessionModel: Model<ViewingSession>,
@@ -32,7 +42,10 @@ export class ViewingMetricsService {
     @InjectModel(Event.name)
     private eventModel: Model<EventDocument>,
     private rtdbService: RtdbService,
-  ) {}
+  ) {
+    // Limpiar caché de UIDs desconocidos cada 15 minutos
+    setInterval(() => this.cleanUnknownUIDsCache(), 15 * 60 * 1000);
+  }
 
   /**
    * Llamado por rtdb-presence-watcher cuando detecta cambios de presencia
@@ -52,37 +65,114 @@ export class ViewingMetricsService {
 
     const isLive = event.status === 'live';
     const now = new Date();
+    const nowTimestamp = now.getTime();
 
-    // Procesar cada UID presente
-    for (const [firebaseUID, data] of Object.entries(presenceData)) {
-      if (!data.on) continue; // Solo procesar usuarios "online"
+    // Filtrar UIDs activos
+    const initialActiveUIDs = Object.entries(presenceData)
+      .filter(([, data]) => data.on)
+      .map(([uid]) => uid);
 
-      // Buscar EventUser asociado a este UID + evento
-      const eventUser = await this.eventUserModel
-        .findOne({ eventId, firebaseUID })
-        .lean();
+    if (initialActiveUIDs.length === 0) return;
 
-      if (!eventUser) {
-        this.logger.warn(
-          `No EventUser found for UID ${firebaseUID} on event ${eventId}`,
-        );
-        continue;
+    // Filtrar UIDs que sabemos que no tienen EventUser (caché)
+    const uidsToCheck = initialActiveUIDs.filter((uid) => {
+      const cached = this.unknownUIDs.get(`${eventId}:${uid}`);
+      if (!cached) return true;
+
+      // Si el caché ha expirado, volver a verificar
+      if (nowTimestamp - cached.lastWarned > this.UNKNOWN_UID_CACHE_TTL) {
+        this.unknownUIDs.delete(`${eventId}:${uid}`);
+        return true;
       }
+      return false;
+    });
 
-      // Buscar sesión activa o crear nueva
-      let session = await this.viewingSessionModel.findOne({
+    if (uidsToCheck.length === 0) {
+      // Todos los UIDs están en caché como desconocidos
+      return;
+    }
+
+    // Batch query: buscar todos los EventUsers de una vez
+    const eventUsers = await this.eventUserModel
+      .find(
+        { eventId, firebaseUID: { $in: uidsToCheck } },
+        { _id: 1, firebaseUID: 1 },
+      )
+      .lean()
+      .exec();
+
+    // Crear mapa de UID → EventUser para acceso rápido
+    const eventUserMap = new Map(eventUsers.map((eu) => [eu.firebaseUID, eu]));
+
+    // Identificar UIDs sin EventUser y agregarlos al caché
+    const unknownUIDs = uidsToCheck.filter((uid) => !eventUserMap.has(uid));
+    for (const uid of unknownUIDs) {
+      const cacheKey = `${eventId}:${uid}`;
+      const cached = this.unknownUIDs.get(cacheKey);
+
+      // Solo logear warning si no está en caché o si ha pasado el cooldown
+      if (
+        !cached ||
+        nowTimestamp - cached.lastWarned > this.UNKNOWN_UID_WARNING_COOLDOWN
+      ) {
+        this.logger.warn(
+          `No EventUser found for UID ${uid} on event ${eventId} (usuario no registrado o anónimo)`,
+        );
+        this.unknownUIDs.set(cacheKey, { eventId, lastWarned: nowTimestamp });
+      }
+    }
+
+    // Alerta si hay demasiados usuarios sin registro (posible problema)
+    const totalUIDs = uidsToCheck.length;
+    const registeredCount = totalUIDs - unknownUIDs.length;
+    if (unknownUIDs.length > 0 && totalUIDs > 10) {
+      const unknownPercentage = (unknownUIDs.length / totalUIDs) * 100;
+      if (unknownPercentage > 30) {
+        this.logger.error(
+          `⚠️ ALERT: ${unknownUIDs.length}/${totalUIDs} (${unknownPercentage.toFixed(1)}%) unknown UIDs in event ${eventId}. Possible registration issue!`,
+        );
+      }
+    }
+
+    // Procesar solo usuarios registrados - OPTIMIZADO CON BATCH OPERATIONS
+    const registeredUIDs = Object.entries(presenceData)
+      .filter(([uid, data]) => data.on && eventUserMap.has(uid))
+      .map(([uid]) => uid);
+
+    if (registeredUIDs.length === 0) {
+      // No hay usuarios registrados para procesar
+      await this.updateConcurrentViewers(eventId, []);
+      return;
+    }
+
+    // Batch query: obtener todas las sesiones activas de una vez
+    const activeSessions = await this.viewingSessionModel
+      .find({
         eventId,
-        eventUserId: eventUser._id,
-        firebaseUID,
+        firebaseUID: { $in: registeredUIDs },
         endedAt: null,
-      });
+      })
+      .exec();
 
-      if (!session) {
-        // Crear nueva sesión
-        session = new this.viewingSessionModel({
+    // Crear mapa de UID → Session para acceso rápido
+    const sessionMap = new Map(activeSessions.map((s) => [s.firebaseUID, s]));
+
+    // Preparar operaciones bulk
+    const bulkOps: any[] = [];
+    const newSessions: Partial<ViewingSession>[] = [];
+
+    for (const uid of registeredUIDs) {
+      const eventUser = eventUserMap.get(uid);
+      if (!eventUser) continue;
+
+      const existingSession = sessionMap.get(uid);
+
+      if (!existingSession) {
+        // Crear nueva sesión (insertamos después)
+        newSessions.push({
           eventId,
-          eventUserId: eventUser._id,
-          firebaseUID,
+          eventUserId: new Types.ObjectId(eventUser._id.toString()),
+          firebaseUID: uid,
           startedAt: now,
           lastHeartbeat: now,
           totalWatchTimeSeconds: 0,
@@ -90,34 +180,68 @@ export class ViewingMetricsService {
           wasLiveDuringSession: isLive,
         });
       } else {
-        // Actualizar sesión existente
+        // Actualizar sesión existente con bulk operation
         const timeSinceLastHeartbeat = Math.floor(
-          (now.getTime() - session.lastHeartbeat.getTime()) / 1000,
+          (now.getTime() - existingSession.lastHeartbeat.getTime()) / 1000,
         );
 
-        // Solo sumar tiempo si el heartbeat es "razonable" (< 120s)
-        // Evita saltos grandes si el usuario estuvo offline mucho tiempo
+        // Solo actualizar si el heartbeat es razonable
         if (timeSinceLastHeartbeat <= 120) {
-          session.totalWatchTimeSeconds += timeSinceLastHeartbeat;
+          const updates: any = {
+            lastHeartbeat: now,
+            $inc: {
+              totalWatchTimeSeconds: timeSinceLastHeartbeat,
+            },
+          };
 
           if (isLive) {
-            session.liveWatchTimeSeconds += timeSinceLastHeartbeat;
-            session.wasLiveDuringSession = true;
+            updates.$inc.liveWatchTimeSeconds = timeSinceLastHeartbeat;
+            updates.wasLiveDuringSession = true;
           }
-        }
 
-        session.lastHeartbeat = now;
+          bulkOps.push({
+            updateOne: {
+              filter: { _id: existingSession._id },
+              update: updates,
+            },
+          });
+        } else {
+          // Solo actualizar timestamp si el heartbeat es muy antiguo
+          bulkOps.push({
+            updateOne: {
+              filter: { _id: existingSession._id },
+              update: { lastHeartbeat: now },
+            },
+          });
+        }
+      }
+    }
+
+    // Ejecutar operaciones en batch
+    try {
+      // Insertar nuevas sesiones si hay
+      if (newSessions.length > 0) {
+        await this.viewingSessionModel.insertMany(newSessions, {
+          ordered: false,
+        });
       }
 
-      await session.save();
+      // Ejecutar actualizaciones bulk si hay
+      if (bulkOps.length > 0) {
+        await this.viewingSessionModel.bulkWrite(bulkOps, { ordered: false });
+      }
+    } catch (error) {
+      this.logger.error(
+        `Error in batch session updates: ${(error as Error).message}`,
+      );
     }
 
     // Actualizar concurrentes con los UIDs activos en RTDB
-    const activeUIDs = Object.entries(presenceData)
+    const activeUIDsForUpdate = Object.entries(presenceData)
       .filter(([, data]) => data.on)
       .map(([uid]) => uid);
 
-    await this.updateConcurrentViewers(eventId, activeUIDs);
+    await this.updateConcurrentViewers(eventId, activeUIDsForUpdate);
   }
 
   /**
@@ -138,11 +262,15 @@ export class ViewingMetricsService {
       // Hay usuarios activos en RTDB
 
       const eventUsers = await this.eventUserModel
-        .find({
-          eventId,
-          firebaseUID: { $in: activeFirebaseUIDs },
-        })
-        .lean();
+        .find(
+          {
+            eventId,
+            firebaseUID: { $in: activeFirebaseUIDs },
+          },
+          { _id: 1 }, // Solo proyectar el campo necesario
+        )
+        .lean()
+        .exec();
 
       uniqueEventUsers = new Set(eventUsers.map((eu) => eu._id.toString()));
     } else {
@@ -246,12 +374,17 @@ export class ViewingMetricsService {
     }
 
     // Obtener todas las sesiones que estuvieron durante el live
+    // Solo proyectar el campo necesario para reducir memoria
     const liveSessions = await this.viewingSessionModel
-      .find({
-        eventId,
-        wasLiveDuringSession: true, // Solo contar quien estuvo durante el live
-      })
-      .lean();
+      .find(
+        {
+          eventId,
+          wasLiveDuringSession: true, // Solo contar quien estuvo durante el live
+        },
+        { eventUserId: 1 }, // Solo necesitamos el eventUserId
+      )
+      .lean()
+      .exec();
 
     // Consolidar por EventUser (un usuario puede tener múltiples sesiones/dispositivos)
     const uniqueEventUsers = new Set(
@@ -358,6 +491,64 @@ export class ViewingMetricsService {
         totalWatchTimeSeconds: s.totalWatchTimeSeconds,
         liveWatchTimeSeconds: s.liveWatchTimeSeconds,
       })),
+    };
+  }
+
+  /**
+   * Contar sesiones abiertas (para diagnóstico)
+   */
+  async countOpenSessions(): Promise<number> {
+    return await this.viewingSessionModel
+      .countDocuments({ endedAt: null })
+      .exec();
+  }
+
+  /**
+   * Contar sesiones obsoletas (sin heartbeat > 2 horas, para diagnóstico)
+   */
+  async countStaleSessions(): Promise<number> {
+    const cutoff = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2 horas
+    return await this.viewingSessionModel
+      .countDocuments({
+        endedAt: null,
+        lastHeartbeat: { $lt: cutoff },
+      })
+      .exec();
+  }
+
+  /**
+   * Limpiar caché de UIDs desconocidos (ejecutado periódicamente)
+   */
+  private cleanUnknownUIDsCache() {
+    const now = Date.now();
+    let cleaned = 0;
+
+    for (const [key, value] of this.unknownUIDs.entries()) {
+      if (now - value.lastWarned > this.UNKNOWN_UID_CACHE_TTL) {
+        this.unknownUIDs.delete(key);
+        cleaned++;
+      }
+    }
+
+    if (cleaned > 0) {
+      this.logger.debug(`Cleaned ${cleaned} unknown UID cache entries`);
+    }
+  }
+
+  /**
+   * Obtener estadísticas de UIDs desconocidos (para diagnóstico)
+   */
+  getUnknownUIDsStats() {
+    const statsByEvent = new Map<string, number>();
+
+    for (const [, value] of this.unknownUIDs.entries()) {
+      const count = statsByEvent.get(value.eventId) || 0;
+      statsByEvent.set(value.eventId, count + 1);
+    }
+
+    return {
+      total: this.unknownUIDs.size,
+      byEvent: Object.fromEntries(statsByEvent),
     };
   }
 }

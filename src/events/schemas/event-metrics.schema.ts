@@ -10,7 +10,7 @@ import { Document } from 'mongoose';
  */
 @Schema({ timestamps: true })
 export class EventMetrics extends Document {
-  @Prop({ required: true, unique: true, index: true })
+  @Prop({ required: true, unique: true })
   eventId: string;
 
   // Espectadores concurrentes ahora (últimos 60s)

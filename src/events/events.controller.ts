@@ -294,4 +294,67 @@ export class EventsController {
   async recalculateMetrics(@Param('eventId') eventId: string) {
     return await this.metricsService.calculateEventMetrics(eventId);
   }
+
+  // ENDPOINTS DE DIAGNÓSTICO Y MANTENIMIENTO
+
+  /**
+   * Limpiar sesiones obsoletas manualmente
+   * Cierra sesiones sin heartbeat > 2 horas
+   */
+  @Post('cleanup/stale-sessions')
+  @UseGuards(FirebaseAuthGuard)
+  async cleanupStaleSessions() {
+    const result = await this.metricsService.cleanupStaleSessions();
+    return {
+      success: true,
+      message: `Cleaned ${result.cleaned} stale sessions`,
+      cleaned: result.cleaned,
+    };
+  }
+
+  /**
+   * Diagnóstico de salud del sistema de métricas
+   * Retorna información sobre listeners activos, sesiones abiertas, etc.
+   */
+  @Get('debug/health')
+  @UseGuards(FirebaseAuthGuard)
+  async healthCheck() {
+    const memoryUsage = process.memoryUsage();
+    
+    // Contar sesiones abiertas
+    const openSessions = await this.metricsService.countOpenSessions();
+    
+    // Contar sesiones obsoletas (sin heartbeat > 2 horas)
+    const staleSessions = await this.metricsService.countStaleSessions();
+
+    // Estadísticas de UIDs desconocidos
+    const unknownUIDs = this.metricsService.getUnknownUIDsStats();
+
+    return {
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      memory: {
+        heapUsedMB: Math.round(memoryUsage.heapUsed / 1024 / 1024),
+        heapTotalMB: Math.round(memoryUsage.heapTotal / 1024 / 1024),
+        rssMB: Math.round(memoryUsage.rss / 1024 / 1024),
+        externalMB: Math.round(memoryUsage.external / 1024 / 1024),
+      },
+      sessions: {
+        open: openSessions,
+        stale: staleSessions,
+        needsCleanup: staleSessions > 10,
+      },
+      unknownUsers: {
+        total: unknownUIDs.total,
+        byEvent: unknownUIDs.byEvent,
+        info: unknownUIDs.total > 0 
+          ? 'Usuarios conectados sin EventUser (anónimos o no registrados)'
+          : 'No hay usuarios desconocidos',
+      },
+      recommendations: [
+        ...(staleSessions > 10 ? ['Run POST /api/events/cleanup/stale-sessions'] : []),
+        ...(unknownUIDs.total > 20 ? ['Muchos usuarios no registrados conectándose. Verificar flujo de registro.'] : []),
+      ],
+    };
+  }
 }

@@ -8,10 +8,10 @@ import { Document, Types } from 'mongoose';
  */
 @Schema({ timestamps: true })
 export class ViewingSession extends Document {
-  @Prop({ required: true, index: true })
+  @Prop({ required: true })
   eventId: string; // ID del evento
 
-  @Prop({ type: Types.ObjectId, ref: 'EventUser', required: true, index: true })
+  @Prop({ type: Types.ObjectId, ref: 'EventUser', required: true })
   eventUserId: Types.ObjectId; // Referencia al EventUser (espectador único)
 
   @Prop({ required: true })
@@ -51,5 +51,6 @@ export const ViewingSessionSchema =
 // Índices para queries eficientes
 ViewingSessionSchema.index({ eventId: 1, eventUserId: 1 }); // Todas las sesiones de un usuario en un evento
 ViewingSessionSchema.index({ eventId: 1, lastHeartbeat: 1 }); // Sesiones activas por evento
-ViewingSessionSchema.index({ firebaseUID: 1 }); // Buscar sesión por UID
+ViewingSessionSchema.index({ eventId: 1, firebaseUID: 1, endedAt: 1 }); // Buscar sesión activa específica (CRÍTICO para performance)
 ViewingSessionSchema.index({ eventId: 1, wasLiveDuringSession: 1 }); // Sesiones que vieron el live
+ViewingSessionSchema.index({ endedAt: 1, lastHeartbeat: 1 }); // Para limpieza de sesiones obsoletas

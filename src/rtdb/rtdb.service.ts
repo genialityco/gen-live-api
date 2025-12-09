@@ -42,4 +42,18 @@ export class RtdbService {
       lastUpdate: admin.database.ServerValue.TIMESTAMP,
     });
   }
+
+  /**
+   * Actualizar datos en una ruta específica de RTDB
+   */
+  async update(path: string, data: any) {
+    await this.ref(path).set(data);
+  }
+
+  /**
+   * Eliminar datos de una ruta específica de RTDB
+   */
+  async delete(path: string) {
+    await this.ref(path).remove();
+  }
 }
