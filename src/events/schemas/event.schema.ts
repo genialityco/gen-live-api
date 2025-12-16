@@ -73,6 +73,9 @@ export class Event {
     provider?: string;
   };
 
+  @Prop({ type: Date })
+  endedAt?: Date;
+
   @Prop({
     enum: ['upcoming', 'live', 'ended', 'replay'],
     default: 'upcoming',

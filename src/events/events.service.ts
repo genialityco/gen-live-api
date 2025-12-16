@@ -1,5 +1,4 @@
 /* eslint-disable @typescript-eslint/no-floating-promises */
-/* eslint-disable @typescript-eslint/restrict-template-expressions */
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-base-to-string */
@@ -151,6 +150,11 @@ export class EventsService implements OnModuleInit {
     }
 
     if (status === 'ended') {
+      await this.model.findByIdAndUpdate(
+        eventId,
+        { endedAt: new Date() },
+        { new: true },
+      );
       await this.rtdb.setNowCount(eventId, 0);
       // Calcular métricas finales cuando el evento termina
       await this.metricsService.calculateEventMetrics(eventId);
