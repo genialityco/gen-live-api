@@ -320,10 +320,10 @@ export class EventsController {
   @UseGuards(FirebaseAuthGuard)
   async healthCheck() {
     const memoryUsage = process.memoryUsage();
-    
+
     // Contar sesiones abiertas
     const openSessions = await this.metricsService.countOpenSessions();
-    
+
     // Contar sesiones obsoletas (sin heartbeat > 2 horas)
     const staleSessions = await this.metricsService.countStaleSessions();
 
@@ -347,13 +347,20 @@ export class EventsController {
       unknownUsers: {
         total: unknownUIDs.total,
         byEvent: unknownUIDs.byEvent,
-        info: unknownUIDs.total > 0 
-          ? 'Usuarios conectados sin EventUser (anónimos o no registrados)'
-          : 'No hay usuarios desconocidos',
+        info:
+          unknownUIDs.total > 0
+            ? 'Usuarios conectados sin EventUser (anónimos o no registrados)'
+            : 'No hay usuarios desconocidos',
       },
       recommendations: [
-        ...(staleSessions > 10 ? ['Run POST /api/events/cleanup/stale-sessions'] : []),
-        ...(unknownUIDs.total > 20 ? ['Muchos usuarios no registrados conectándose. Verificar flujo de registro.'] : []),
+        ...(staleSessions > 10
+          ? ['Run POST /api/events/cleanup/stale-sessions']
+          : []),
+        ...(unknownUIDs.total > 20
+          ? [
+              'Muchos usuarios no registrados conectándose. Verificar flujo de registro.',
+            ]
+          : []),
       ],
     };
   }

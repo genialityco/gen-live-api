@@ -14,6 +14,7 @@ import { RegistrationsModule } from './registrations/registrations.module';
 import { AttendanceModule } from './attendance/attendance.module';
 import { UsersModule } from './users/users.module';
 import { MailModule } from './mail/mail.module';
+import { LivekitModule } from './livekit/livekit.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { MailModule } from './mail/mail.module';
     PublicModule,
     UsersModule,
     MailModule,
+    LivekitModule,
   ],
   providers: [
     {
