@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 import { Module, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Event, EventSchema } from './schemas/event.schema';
@@ -49,9 +50,19 @@ import { Logger } from '@nestjs/common';
     RtdbModule,
     OrganizationsModule,
   ],
-  providers: [EventsService, EventUserService, ViewingMetricsService, PollService],
+  providers: [
+    EventsService,
+    EventUserService,
+    ViewingMetricsService,
+    PollService,
+  ],
   controllers: [EventsController, EventUserController, PollController],
-  exports: [EventsService, EventUserService, ViewingMetricsService, PollService],
+  exports: [
+    EventsService,
+    EventUserService,
+    ViewingMetricsService,
+    PollService,
+  ],
 })
 export class EventsModule implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(EventsModule.name);
@@ -65,20 +76,40 @@ export class EventsModule implements OnModuleInit, OnModuleDestroy {
    */
   onModuleInit() {
     // Limpieza inicial después de 5 minutos del inicio
-    setTimeout(() => {
-      this.metricsService.cleanupStaleSessions()
-        .then(result => this.logger.log(`Initial cleanup: ${result.cleaned} stale sessions removed`))
-        .catch(err => this.logger.error(`Initial cleanup error: ${err.message}`));
-    }, 5 * 60 * 1000);
+    setTimeout(
+      () => {
+        this.metricsService
+          .cleanupStaleSessions()
+          .then((result) =>
+            this.logger.log(
+              `Initial cleanup: ${result.cleaned} stale sessions removed`,
+            ),
+          )
+          .catch((err) =>
+            this.logger.error(`Initial cleanup error: ${err.message}`),
+          );
+      },
+      5 * 60 * 1000,
+    );
 
     // Limpieza periódica cada 30 minutos
-    this.cleanupInterval = setInterval(() => {
-      this.metricsService.cleanupStaleSessions()
-        .then(result => this.logger.log(`Periodic cleanup: ${result.cleaned} stale sessions removed`))
-        .catch(err => this.logger.error(`Cleanup error: ${err.message}`));
-    }, 30 * 60 * 1000);
+    this.cleanupInterval = setInterval(
+      () => {
+        this.metricsService
+          .cleanupStaleSessions()
+          .then((result) =>
+            this.logger.log(
+              `Periodic cleanup: ${result.cleaned} stale sessions removed`,
+            ),
+          )
+          .catch((err) => this.logger.error(`Cleanup error: ${err.message}`));
+      },
+      30 * 60 * 1000,
+    );
 
-    this.logger.log('✅ Periodic session cleanup scheduler initialized (every 30 min)');
+    this.logger.log(
+      '✅ Periodic session cleanup scheduler initialized (every 30 min)',
+    );
   }
 
   onModuleDestroy() {
