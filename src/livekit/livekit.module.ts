@@ -9,12 +9,16 @@ import {
   LiveStreamConfig,
   LiveStreamConfigSchema,
 } from './schemas/live-stream-config.schema';
+import { RtdbModule } from 'src/rtdb/rtdb.module';
+import { EventsModule } from 'src/events/events.module';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: LiveStreamConfig.name, schema: LiveStreamConfigSchema },
     ]),
+    RtdbModule,
+    EventsModule,
   ],
   providers: [LivekitService, LivekitEgressService, LiveConfigService],
   controllers: [LivekitController, LiveController],

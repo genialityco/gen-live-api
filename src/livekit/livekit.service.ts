@@ -93,4 +93,9 @@ export class LivekitService {
       throw new InternalServerErrorException('No se pudo generar token');
     }
   }
+
+  async removeParticipant(eventSlug: string, identity: string) {
+    const roomName = this.buildRoomName(eventSlug);
+    await this.roomClient.removeParticipant(roomName, identity);
+  }
 }
