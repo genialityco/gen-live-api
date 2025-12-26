@@ -11,6 +11,7 @@ import {
 } from './schemas/live-stream-config.schema';
 import { RtdbModule } from 'src/rtdb/rtdb.module';
 import { EventsModule } from 'src/events/events.module';
+import { MuxService } from './mux.service';
 
 @Module({
   imports: [
@@ -20,8 +21,18 @@ import { EventsModule } from 'src/events/events.module';
     RtdbModule,
     EventsModule,
   ],
-  providers: [LivekitService, LivekitEgressService, LiveConfigService],
+  providers: [
+    LivekitService,
+    LivekitEgressService,
+    LiveConfigService,
+    MuxService,
+  ],
   controllers: [LivekitController, LiveController],
-  exports: [LivekitService, LivekitEgressService, LiveConfigService],
+  exports: [
+    LivekitService,
+    LivekitEgressService,
+    LiveConfigService,
+    MuxService,
+  ],
 })
 export class LivekitModule {}

@@ -42,6 +42,21 @@ export class LiveStreamConfig {
 
   @Prop({ default: '' })
   lastError: string;
+
+  @Prop({ default: 'gcore' })
+  provider: 'gcore' | 'mux';
+
+  @Prop({ default: '' })
+  providerStreamId: string; // en mux: live_stream_id
+
+  @Prop({ default: '' })
+  providerPlaybackId: string; // en mux: playback_id
+
+  @Prop({ default: false })
+  showFrame: boolean;
+
+  @Prop({ default: '' })
+  frameUrl: string;
 }
 
 export const LiveStreamConfigSchema =
