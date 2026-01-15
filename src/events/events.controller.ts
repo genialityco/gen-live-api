@@ -364,4 +364,16 @@ export class EventsController {
       ],
     };
   }
+
+  // EMERGENCY RESET - Resetear estado cuando LiveKit falla
+  @Post('emergency-reset/:eventSlug')
+  async emergencyReset(@Param('eventSlug') eventSlug: string) {
+    return await this.svc.emergencyResetState(eventSlug);
+  }
+
+  // Validar si un egress existe en LiveKit
+  @Get('validate-egress/:egressId')
+  async validateEgress(@Param('egressId') egressId: string) {
+    return await this.svc.validateEgressExists(egressId);
+  }
 }

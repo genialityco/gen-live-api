@@ -27,8 +27,8 @@ export class LiveStreamConfig {
   playbackHlsUrl: string;
 
   // opciones egress
-  @Prop({ enum: ['grid', 'speaker'], default: 'grid' })
-  layout: 'grid' | 'speaker';
+  @Prop({ enum: ['grid', 'speaker', 'presentation', 'pip', 'side_by_side'], default: 'speaker' })
+  layout: 'grid' | 'speaker' | 'presentation' | 'pip' | 'side_by_side';
 
   @Prop({ default: 20 })
   maxParticipants: number;
@@ -42,6 +42,21 @@ export class LiveStreamConfig {
 
   @Prop({ default: '' })
   lastError: string;
+
+  @Prop({ default: 'gcore' })
+  provider: 'gcore' | 'mux';
+
+  @Prop({ default: '' })
+  providerStreamId: string; // en mux: live_stream_id
+
+  @Prop({ default: '' })
+  providerPlaybackId: string; // en mux: playback_id
+
+  @Prop({ default: false })
+  showFrame: boolean;
+
+  @Prop({ default: '' })
+  frameUrl: string;
 }
 
 export const LiveStreamConfigSchema =

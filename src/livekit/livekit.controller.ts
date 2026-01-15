@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 // src/livekit/livekit.controller.ts
@@ -12,7 +13,11 @@ import {
   UseGuards,
   Req,
   Inject,
+  UploadedFile,
+  UseInterceptors,
+  Delete,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { IsIn, IsOptional, IsString } from 'class-validator';
 import { LivekitService } from './livekit.service';
 import { LiveConfigService } from './live-config.service';
@@ -45,6 +50,7 @@ export class LivekitController {
     private readonly livekitService: LivekitService,
     private readonly liveConfig: LiveConfigService,
     @Inject('RTDB') private readonly rtdb: admin.database.Database,
+    @Inject('FIREBASE_ADMIN') private readonly firebaseAdmin: typeof admin,
   ) {}
 
   @Post('rooms/ensure')
@@ -74,7 +80,7 @@ export class LivekitController {
       identity,
       name,
     });
-
+    console.log(token);
     return { token };
   }
 
@@ -89,17 +95,41 @@ export class LivekitController {
       srtIngestUrl?: string;
       playbackHlsUrl?: string;
       layout?: 'grid' | 'speaker';
+      showFrame?: boolean;
+      frameUrl?: string;
     },
   ) {
     if (!body.eventSlug) throw new BadRequestException('eventSlug requerido');
-    const saved = await this.liveConfig.update(body.eventSlug, body);
-    return { ok: true, id: saved._id };
+
+    const allowSecrets = process.env.ALLOW_LIVE_CREDENTIAL_EDIT === 'true';
+
+    const patch: any = { ...body };
+
+    if (!allowSecrets) {
+      delete patch.rtmpServerUrl;
+      delete patch.rtmpStreamKey;
+      delete patch.srtIngestUrl;
+      delete patch.playbackHlsUrl;
+    }
+
+    // allow frame settings
+    if (typeof body.showFrame === 'boolean') patch.showFrame = body.showFrame;
+    if (typeof body.frameUrl === 'string') patch.frameUrl = body.frameUrl;
+
+    const saved = await this.liveConfig.update(body.eventSlug, patch);
+    return { ok: true, id: saved._id, allowSecrets };
   }
 
   @Get('config')
   async getConfig(@Query('eventSlug') eventSlug: string) {
     if (!eventSlug) throw new BadRequestException('eventSlug requerido');
     const cfg = await this.liveConfig.getOrCreate(eventSlug);
+
+    if (!cfg) {
+      throw new BadRequestException(
+        'No se encontró configuración para el evento',
+      );
+    }
 
     // MVP: enmascarar secretos para UI
     return {
@@ -114,6 +144,8 @@ export class LivekitController {
       status: cfg.status,
       activeEgressId: cfg.activeEgressId,
       lastError: cfg.lastError,
+      showFrame: !!cfg.showFrame,
+      frameUrl: cfg.frameUrl || '',
     };
   }
 
@@ -207,6 +239,65 @@ export class LivekitController {
       updatedAt: admin.database.ServerValue.TIMESTAMP,
     });
 
+    return { ok: true };
+  }
+
+  // POST /livekit/frame/upload
+  @Post('frame/upload')
+  @UseInterceptors(FileInterceptor('frame'))
+  async uploadFrame(
+    @Req() req: any,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    const eventSlug = req.body.eventSlug as string;
+    if (!eventSlug) throw new BadRequestException('eventSlug requerido');
+    if (!file) throw new BadRequestException('frame file required');
+
+    // validate mime
+    if (!['image/png', 'image/jpeg'].includes(file.mimetype)) {
+      throw new BadRequestException('Only PNG/JPEG allowed');
+    }
+    // validate size ≤ 5MB
+    if (file.size > 5 * 1024 * 1024) {
+      throw new BadRequestException('File too large (max 5MB)');
+    }
+
+    const bucket = this.firebaseAdmin.storage().bucket();
+    const timestamp = Date.now();
+    const ext = file.mimetype === 'image/png' ? 'png' : 'jpg';
+    const filePath = `live-frames/${eventSlug}/frame_${timestamp}.${ext}`;
+    const fileRef = bucket.file(filePath);
+
+    // upload
+    await fileRef.save(file.buffer, {
+      metadata: { contentType: file.mimetype },
+      public: true,
+    });
+
+    // make public and get URL
+    await fileRef.makePublic();
+    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+
+    // save to mongo
+    await this.liveConfig.update(eventSlug, {
+      frameUrl: publicUrl,
+      showFrame: true,
+    });
+
+    return { ok: true, frameUrl: publicUrl };
+  }
+
+  // DELETE /livekit/frame
+  @Delete('frame')
+  async deleteFrame(
+    @Query('eventSlug') eventSlug?: string,
+    @Body() body?: { eventSlug?: string },
+  ) {
+    const slug = eventSlug || body?.eventSlug;
+    if (!slug) throw new BadRequestException('eventSlug requerido');
+
+    // clear reference in mongo (no need to delete file from bucket)
+    await this.liveConfig.update(slug, { frameUrl: '', showFrame: false });
     return { ok: true };
   }
 }

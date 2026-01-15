@@ -27,6 +27,8 @@ import { RtdbPresenceWatcherService } from '../rtdb/rtdb-presence-watcher.servic
 import { RegisterToEventDto } from './dtos/register-to-event.dto';
 import { UpdateEventBrandingDto } from './dtos/update-event-branding.dto';
 import { ViewingMetricsService } from './viewing-metrics.service.v2';
+import { LivekitEgressService } from '../livekit/livekit-egress.service';
+import { LiveConfigService } from '../livekit/live-config.service';
 
 function normalizeByType(value: any, type: FormFieldType | undefined) {
   if (value === null || value === undefined) return value;
@@ -73,6 +75,8 @@ export class EventsService implements OnModuleInit {
     private rtdb: RtdbService,
     private watcher: RtdbPresenceWatcherService,
     private metricsService: ViewingMetricsService,
+    private livekitEgressService: LivekitEgressService,
+    private liveConfigService: LiveConfigService,
   ) {
     // Configurar watcher con servicio de métricas para evitar dependencia circular
     this.watcher.setViewingMetricsService(this.metricsService);
@@ -860,5 +864,110 @@ export class EventsService implements OnModuleInit {
     }
 
     return event;
+  }
+
+  /**
+   * Reset de emergencia: limpia estado cuando LiveKit falla o se desincroniza
+   * - Detiene egress en LiveKit si existe
+   * - Elimina config de DB
+   * - Limpia estado en RTDB
+   */
+  async emergencyResetState(eventSlug: string) {
+    this.logger.log(`🚨 Emergency reset requested for event: ${eventSlug}`);
+
+    const results = {
+      egressStopped: false,
+      configDeleted: false,
+      rtdbCleared: false,
+      errors: [] as string[],
+    };
+
+    try {
+      // 1. Buscar config en DB
+      let config: any = null;
+      try {
+        config = await this.liveConfigService.get(eventSlug);
+      } catch (err: any) {
+        this.logger.log('ℹ️ No config found in DB');
+      }
+
+      if (config?.activeEgressId) {
+        // 2. Intentar detener egress en LiveKit
+        try {
+          await this.livekitEgressService.stopEgress(config.activeEgressId);
+          results.egressStopped = true;
+          this.logger.log(`✅ Egress ${config.activeEgressId} stopped`);
+        } catch (err: any) {
+          const msg = `Failed to stop egress: ${err.message}`;
+          results.errors.push(msg);
+          this.logger.warn(`⚠️ ${msg}`);
+        }
+
+        // 3. Resetear config en DB (limpiar activeEgressId y status)
+        try {
+          await this.liveConfigService.update(eventSlug, {
+            activeEgressId: '',
+            status: 'idle',
+            lastError: 'Reset manual',
+          });
+          results.configDeleted = true;
+          this.logger.log(`✅ Config reset in DB`);
+        } catch (err: any) {
+          const msg = `Failed to reset config: ${err.message}`;
+          results.errors.push(msg);
+          this.logger.error(`❌ ${msg}`);
+        }
+      } else {
+        this.logger.log('ℹ️ No active egress config found');
+      }
+
+      // 4. Limpiar RTDB
+      try {
+        await this.rtdb.ref(`/live/${eventSlug}/egressId`).remove();
+        await this.rtdb.ref(`/live/${eventSlug}/egressStatus`).remove();
+        results.rtdbCleared = true;
+        this.logger.log(`✅ RTDB state cleared`);
+      } catch (err: any) {
+        const msg = `Failed to clear RTDB: ${err.message}`;
+        results.errors.push(msg);
+        this.logger.error(`❌ ${msg}`);
+      }
+
+      return {
+        success: results.errors.length === 0,
+        message:
+          results.errors.length === 0
+            ? 'Estado reseteado exitosamente'
+            : `Reset parcial con ${results.errors.length} error(es)`,
+        details: results,
+      };
+    } catch (err: any) {
+      this.logger.error(`❌ Emergency reset failed: ${err.message}`);
+      return {
+        success: false,
+        message: `Error durante reset: ${err.message}`,
+        details: results,
+      };
+    }
+  }
+
+  /**
+   * Valida si un egress existe en LiveKit
+   */
+  async validateEgressExists(egressId: string) {
+    try {
+      const egressInfo = await this.livekitEgressService.getEgress(egressId);
+      return {
+        exists: true,
+        egressId,
+        status: egressInfo.status || 'unknown',
+      };
+    } catch (err: any) {
+      return {
+        exists: false,
+        egressId,
+        error: err.message,
+      };
+    }
   }
 }

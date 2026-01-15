@@ -31,6 +31,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-ses": "^3.940.0",
+    "@mux/mux-node": "^12.8.1",
     "@nestjs/axios": "^4.0.1",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.2",
