@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
-import { Module, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Module, OnModuleInit, OnModuleDestroy, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Event, EventSchema } from './schemas/event.schema';
 import { EventUser, EventUserSchema } from './schemas/event-user.schema';
@@ -20,6 +20,7 @@ import { PollService } from './poll.service';
 import { PollController } from './poll.controller';
 import { ViewingMetricsService } from './viewing-metrics.service.v2';
 import { RtdbModule } from '../rtdb/rtdb.module';
+import { LivekitModule } from '../livekit/livekit.module';
 import {
   Organization,
   OrganizationSchema,
@@ -49,6 +50,7 @@ import { Logger } from '@nestjs/common';
     ]),
     RtdbModule,
     OrganizationsModule,
+    forwardRef(() => LivekitModule),
   ],
   providers: [
     EventsService,

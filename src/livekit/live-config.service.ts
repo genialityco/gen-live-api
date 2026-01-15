@@ -48,7 +48,7 @@ export class LiveConfigService {
       cfg = await this.model.create({
         eventSlug,
         ingestProtocol: 'rtmp',
-        layout: 'grid',
+        layout: 'speaker',
         maxParticipants: 20,
         status: 'idle',
         provider: 'mux', // si ya migraste, lo razonable es default mux

@@ -27,8 +27,8 @@ export class LiveStreamConfig {
   playbackHlsUrl: string;
 
   // opciones egress
-  @Prop({ enum: ['grid', 'speaker'], default: 'grid' })
-  layout: 'grid' | 'speaker';
+  @Prop({ enum: ['grid', 'speaker', 'presentation', 'pip', 'side_by_side'], default: 'speaker' })
+  layout: 'grid' | 'speaker' | 'presentation' | 'pip' | 'side_by_side';
 
   @Prop({ default: 20 })
   maxParticipants: number;

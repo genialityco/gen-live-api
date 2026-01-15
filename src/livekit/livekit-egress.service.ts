@@ -55,14 +55,12 @@ export class LivekitEgressService {
   }
 
   private buildOpts(
-    layout: 'grid' | 'speaker',
+    layout: 'grid' | 'speaker' | 'presentation' | 'pip' | 'side_by_side',
     eventSlug: string,
     token: string,
   ): RoomCompositeOptions {
-    // URL de tu frontend donde está LkEgressProgram.tsx
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
 
-    // Construir URL completa con todos los query params necesarios
     const params = new URLSearchParams({
       eventSlug,
       layout,
@@ -73,7 +71,6 @@ export class LivekitEgressService {
     return {
       layout,
       encodingOptions: EncodingOptionsPreset.H264_720P_30,
-      // 🎯 ESTO le dice a LiveKit qué URL abrir para capturar
       customBaseUrl: `${frontendUrl}/lk-egress?${params.toString()}`,
     };
   }

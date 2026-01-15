@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { LivekitService } from './livekit.service';
 import { LivekitController } from './livekit.controller';
@@ -19,7 +19,7 @@ import { MuxService } from './mux.service';
       { name: LiveStreamConfig.name, schema: LiveStreamConfigSchema },
     ]),
     RtdbModule,
-    EventsModule,
+    forwardRef(() => EventsModule),
   ],
   providers: [
     LivekitService,
