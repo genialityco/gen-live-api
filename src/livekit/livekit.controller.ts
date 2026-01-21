@@ -146,6 +146,24 @@ export class LivekitController {
       lastError: cfg.lastError,
       showFrame: !!cfg.showFrame,
       frameUrl: cfg.frameUrl || '',
+      // Media library support - dual layer
+      activeVisualItemId: cfg.activeVisualItemId || '',
+      activeAudioItemId: cfg.activeAudioItemId || '',
+      activeMediaItemId: cfg.activeMediaItemId || '', // Legacy
+      mediaEnabled: !!cfg.mediaEnabled,
+      // Legacy fields
+      mediaUrl: cfg.mediaUrl || '',
+      mediaType: cfg.mediaType || 'image',
+      // Override fields
+      mediaMode: cfg.mediaMode,
+      mediaLoop: cfg.mediaLoop,
+      mediaMuted: cfg.mediaMuted,
+      mediaFit: cfg.mediaFit,
+      mediaOpacity: cfg.mediaOpacity,
+      // Background
+      backgroundUrl: cfg.backgroundUrl || '',
+      backgroundType: cfg.backgroundType || 'image',
+      backgroundColor: cfg.backgroundColor || '#000000',
     };
   }
 
@@ -298,6 +316,189 @@ export class LivekitController {
 
     // clear reference in mongo (no need to delete file from bucket)
     await this.liveConfig.update(slug, { frameUrl: '', showFrame: false });
+    return { ok: true };
+  }
+
+  // POST /livekit/background/upload
+  @Post('background/upload')
+  @UseInterceptors(FileInterceptor('background'))
+  async uploadBackground(
+    @Req() req: any,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    const eventSlug = req.body.eventSlug as string;
+    if (!eventSlug) throw new BadRequestException('eventSlug requerido');
+    if (!file) throw new BadRequestException('background file required');
+
+    // Validate mime: image, gif, video
+    const validMimes = [
+      'image/png',
+      'image/jpeg',
+      'image/gif',
+      'video/mp4',
+      'video/webm',
+    ];
+    if (!validMimes.includes(file.mimetype)) {
+      throw new BadRequestException(
+        'Only PNG/JPEG/GIF/MP4/WEBM allowed for background',
+      );
+    }
+
+    // Validate size ≤ 20MB
+    if (file.size > 20 * 1024 * 1024) {
+      throw new BadRequestException('File too large (max 20MB)');
+    }
+
+    // Determine type
+    let backgroundType: 'image' | 'gif' | 'video' = 'image';
+    let ext = 'jpg';
+    if (file.mimetype === 'image/gif') {
+      backgroundType = 'gif';
+      ext = 'gif';
+    } else if (file.mimetype === 'video/mp4') {
+      backgroundType = 'video';
+      ext = 'mp4';
+    } else if (file.mimetype === 'video/webm') {
+      backgroundType = 'video';
+      ext = 'webm';
+    } else if (file.mimetype === 'image/png') {
+      ext = 'png';
+    }
+
+    const bucket = this.firebaseAdmin.storage().bucket();
+    const timestamp = Date.now();
+    const filePath = `live-backgrounds/${eventSlug}/background_${timestamp}.${ext}`;
+    const fileRef = bucket.file(filePath);
+
+    // Upload
+    await fileRef.save(file.buffer, {
+      metadata: { contentType: file.mimetype },
+      public: true,
+    });
+
+    // Make public and get URL
+    await fileRef.makePublic();
+    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+
+    // Save to mongo
+    await this.liveConfig.update(eventSlug, {
+      backgroundUrl: publicUrl,
+      backgroundType,
+    });
+
+    return { ok: true, backgroundUrl: publicUrl, backgroundType };
+  }
+
+  // DELETE /livekit/background
+  @Delete('background')
+  async deleteBackground(
+    @Query('eventSlug') eventSlug?: string,
+    @Body() body?: { eventSlug?: string },
+  ) {
+    const slug = eventSlug || body?.eventSlug;
+    if (!slug) throw new BadRequestException('eventSlug requerido');
+
+    // Clear reference in mongo
+    await this.liveConfig.update(slug, {
+      backgroundUrl: '',
+      backgroundType: 'image',
+    });
+    return { ok: true };
+  }
+
+
+  // POST /livekit/media/upload
+  @Post('media/upload')
+  @UseInterceptors(FileInterceptor('media'))
+  async uploadMedia(
+    @Req() req: any,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    const eventSlug = req.body.eventSlug as string;
+    if (!eventSlug) throw new BadRequestException('eventSlug requerido');
+    if (!file) throw new BadRequestException('media file required');
+
+    const allowed = [
+      'image/png',
+      'image/jpeg',
+      'image/gif',
+      'video/mp4',
+      'video/webm',
+    ];
+
+    if (!allowed.includes(file.mimetype)) {
+      throw new BadRequestException('Only PNG/JPEG/GIF or MP4/WEBM allowed');
+    }
+
+    const isVideo = file.mimetype.startsWith('video/');
+    const max = isVideo ? 60 * 1024 * 1024 : 10 * 1024 * 1024; // ajusta
+    if (file.size > max) {
+      throw new BadRequestException(
+        isVideo ? 'Video too large (max 60MB)' : 'Image too large (max 10MB)',
+      );
+    }
+
+    const bucket = this.firebaseAdmin.storage().bucket();
+    const timestamp = Date.now();
+
+    const ext =
+      file.mimetype === 'image/png'
+        ? 'png'
+        : file.mimetype === 'image/jpeg'
+          ? 'jpg'
+          : file.mimetype === 'image/gif'
+            ? 'gif'
+            : file.mimetype === 'video/webm'
+              ? 'webm'
+              : 'mp4';
+
+    const filePath = `live-media/${eventSlug}/media_${timestamp}.${ext}`;
+    const fileRef = bucket.file(filePath);
+
+    await fileRef.save(file.buffer, {
+      metadata: { contentType: file.mimetype },
+      public: true,
+    });
+
+    await fileRef.makePublic();
+    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+
+    const mediaType = file.mimetype.startsWith('video/')
+      ? 'video'
+      : file.mimetype === 'image/gif'
+        ? 'gif'
+        : 'image';
+
+    // guarda en mongo y activa
+    await this.liveConfig.update(eventSlug, {
+      mediaUrl: publicUrl,
+      mediaEnabled: true,
+      mediaType,
+      // defaults útiles
+      mediaMode: 'full',
+      mediaMuted: true,
+      mediaLoop: false,
+      mediaFit: 'cover',
+      mediaOpacity: 1,
+    });
+
+    return { ok: true, mediaUrl: publicUrl, mediaType };
+  }
+
+  // DELETE /livekit/media
+  @Delete('media')
+  async deleteMedia(
+    @Query('eventSlug') eventSlug?: string,
+    @Body() body?: { eventSlug?: string },
+  ) {
+    const slug = eventSlug || body?.eventSlug;
+    if (!slug) throw new BadRequestException('eventSlug requerido');
+
+    await this.liveConfig.update(slug, {
+      mediaEnabled: false,
+      mediaUrl: '',
+    });
+
     return { ok: true };
   }
 }

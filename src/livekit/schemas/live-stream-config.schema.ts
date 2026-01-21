@@ -27,7 +27,10 @@ export class LiveStreamConfig {
   playbackHlsUrl: string;
 
   // opciones egress
-  @Prop({ enum: ['grid', 'speaker', 'presentation', 'pip', 'side_by_side'], default: 'speaker' })
+  @Prop({
+    enum: ['grid', 'speaker', 'presentation', 'pip', 'side_by_side'],
+    default: 'speaker',
+  })
   layout: 'grid' | 'speaker' | 'presentation' | 'pip' | 'side_by_side';
 
   @Prop({ default: 20 })
@@ -57,6 +60,56 @@ export class LiveStreamConfig {
 
   @Prop({ default: '' })
   frameUrl: string;
+
+  // ===== MEDIA LAYER =====
+  @Prop({ default: false })
+  mediaEnabled: boolean;
+
+  // Separación de capas: visual y audio pueden estar activos simultáneamente
+  @Prop({ default: '' })
+  activeVisualItemId: string; // Para video, imagen, gif
+
+  @Prop({ default: '' })
+  activeAudioItemId: string; // Para audio/música
+
+  // Legacy: mantener para backward compatibility
+  @Prop({ default: '' })
+  activeMediaItemId: string;
+
+  // ===== LEGACY FIELDS (backward compatibility) =====
+  @Prop({ enum: ['image', 'gif', 'video', 'audio'], default: 'image' })
+  mediaType: 'image' | 'gif' | 'video' | 'audio';
+
+  @Prop({ default: '' })
+  mediaUrl: string;
+
+  // ===== OVERRIDE FIELDS (pueden sobrescribir defaults del MediaItem) =====
+  // overlay: encima del video / full: reemplaza el video (como cortinilla)
+  @Prop({ enum: ['overlay', 'full'] })
+  mediaMode?: 'overlay' | 'full';
+
+  @Prop()
+  mediaLoop?: boolean;
+
+  // autoplay en navegadores casi siempre requiere muted=true
+  @Prop()
+  mediaMuted?: boolean;
+
+  @Prop({ enum: ['cover', 'contain'] })
+  mediaFit?: 'cover' | 'contain';
+
+  @Prop({ min: 0, max: 1 })
+  mediaOpacity?: number;
+
+  // ===== BACKGROUND =====
+  @Prop({ default: '' })
+  backgroundUrl: string; // URL de imagen/video/gif de fondo
+
+  @Prop({ enum: ['image', 'gif', 'video'], default: 'image' })
+  backgroundType: 'image' | 'gif' | 'video';
+
+  @Prop({ default: '#000000' })
+  backgroundColor: string; // Color de fondo (hex)
 }
 
 export const LiveStreamConfigSchema =
