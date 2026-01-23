@@ -21,6 +21,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { IsIn, IsOptional, IsString } from 'class-validator';
 import { LivekitService } from './livekit.service';
 import { LiveConfigService } from './live-config.service';
+import { MuxService } from './mux.service';
 import { FirebaseAuthGuard } from 'src/common/guards/firebase-auth.guard';
 import * as admin from 'firebase-admin';
 
@@ -49,6 +50,7 @@ export class LivekitController {
   constructor(
     private readonly livekitService: LivekitService,
     private readonly liveConfig: LiveConfigService,
+    private readonly muxService: MuxService,
     @Inject('RTDB') private readonly rtdb: admin.database.Database,
     @Inject('FIREBASE_ADMIN') private readonly firebaseAdmin: typeof admin,
   ) {}
@@ -500,5 +502,141 @@ export class LivekitController {
     });
 
     return { ok: true };
+  }
+
+  /**
+   * GET /livekit/replay?eventSlug=xxx
+   * Obtiene la URL de repetición del live stream de Mux.
+   * Mux crea automáticamente un Asset (video grabado) cuando termina el stream.
+   */
+  @Get('replay')
+  async getReplayUrl(@Query('eventSlug') eventSlug: string) {
+    if (!eventSlug) throw new BadRequestException('eventSlug requerido');
+
+    // Obtener config para verificar que usa Mux y tiene providerStreamId
+    const cfg = await this.liveConfig.get(eventSlug);
+
+    if (cfg.provider !== 'mux') {
+      return {
+        ok: false,
+        status: 'not_available',
+        message:
+          'Este evento no usa Mux como proveedor. No se puede obtener repetición automática.',
+      };
+    }
+
+    if (!cfg.providerStreamId) {
+      return {
+        ok: false,
+        status: 'not_available',
+        message:
+          'No hay un live stream de Mux asociado a este evento. Primero debes transmitir.',
+      };
+    }
+
+    // Obtener URL de replay de Mux
+    const result = await this.muxService.getReplayUrl(cfg.providerStreamId);
+
+    return {
+      ok: result.status === 'ready',
+      ...result,
+    };
+  }
+
+  /**
+   * GET /livekit/stream-info?eventSlug=xxx
+   * Obtiene información del live stream de Mux (status, assets, etc.)
+   */
+  @Get('stream-info')
+  async getStreamInfo(@Query('eventSlug') eventSlug: string) {
+    if (!eventSlug) throw new BadRequestException('eventSlug requerido');
+
+    const cfg = await this.liveConfig.get(eventSlug);
+
+    if (cfg.provider !== 'mux' || !cfg.providerStreamId) {
+      return {
+        ok: false,
+        message: 'No hay stream de Mux configurado para este evento.',
+      };
+    }
+
+    const info = await this.muxService.getLiveStreamInfo(cfg.providerStreamId);
+
+    if (!info) {
+      return {
+        ok: false,
+        message: 'No se pudo obtener información del stream.',
+      };
+    }
+
+    return {
+      ok: true,
+      ...info,
+    };
+  }
+
+  /**
+   * GET /livekit/assets?eventSlug=xxx
+   * Lista todas las grabaciones (assets) disponibles para un evento
+   */
+  @Get('assets')
+  async listAssets(@Query('eventSlug') eventSlug: string) {
+    if (!eventSlug) throw new BadRequestException('eventSlug requerido');
+
+    const cfg = await this.liveConfig.get(eventSlug);
+
+    if (cfg.provider !== 'mux') {
+      return {
+        ok: false,
+        assets: [],
+        message: 'Este evento no usa Mux como proveedor.',
+      };
+    }
+
+    if (!cfg.providerStreamId) {
+      return {
+        ok: false,
+        assets: [],
+        message: 'No hay un live stream de Mux asociado a este evento.',
+      };
+    }
+
+    const result = await this.muxService.listAssets(cfg.providerStreamId);
+
+    return {
+      ok: true,
+      ...result,
+    };
+  }
+
+  /**
+   * GET /livekit/replay-by-asset?eventSlug=xxx&assetId=yyy
+   * Obtiene la URL de repetición de un asset específico
+   */
+  @Get('replay-by-asset')
+  async getReplayByAsset(
+    @Query('eventSlug') eventSlug: string,
+    @Query('assetId') assetId: string,
+  ) {
+    if (!eventSlug) throw new BadRequestException('eventSlug requerido');
+    if (!assetId) throw new BadRequestException('assetId requerido');
+
+    // Verificar que el evento usa Mux
+    const cfg = await this.liveConfig.get(eventSlug);
+
+    if (cfg.provider !== 'mux') {
+      return {
+        ok: false,
+        status: 'not_available',
+        message: 'Este evento no usa Mux como proveedor.',
+      };
+    }
+
+    const result = await this.muxService.getReplayUrlByAssetId(assetId);
+
+    return {
+      ok: result.status === 'ready',
+      ...result,
+    };
   }
 }

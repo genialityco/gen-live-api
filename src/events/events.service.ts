@@ -237,7 +237,7 @@ export class EventsService implements OnModuleInit {
 
   async updateStream(
     eventId: string,
-    payload: { provider: 'vimeo'; url: string; meta?: any },
+    payload: { provider: 'vimeo' | 'mux'; url: string; meta?: any },
   ) {
     const ev = await this.model
       .findByIdAndUpdate(
