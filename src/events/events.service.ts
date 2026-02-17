@@ -29,6 +29,7 @@ import { UpdateEventBrandingDto } from './dtos/update-event-branding.dto';
 import { ViewingMetricsService } from './viewing-metrics.service.v2';
 import { LivekitEgressService } from '../livekit/livekit-egress.service';
 import { LiveConfigService } from '../livekit/live-config.service';
+import { EmailSendService } from '../event-email/email-send.service';
 
 function normalizeByType(value: any, type: FormFieldType | undefined) {
   if (value === null || value === undefined) return value;
@@ -77,6 +78,7 @@ export class EventsService implements OnModuleInit {
     private metricsService: ViewingMetricsService,
     private livekitEgressService: LivekitEgressService,
     private liveConfigService: LiveConfigService,
+    private emailSendService: EmailSendService,
   ) {
     // Configurar watcher con servicio de métricas para evitar dependencia circular
     this.watcher.setViewingMetricsService(this.metricsService);
@@ -261,7 +263,7 @@ export class EventsService implements OnModuleInit {
    * 1. Crea o actualiza el OrgAttendee
    * 2. Crea el EventUser vinculándolo al evento
    */
-  async registerUserToEvent(eventId: string, dto: RegisterToEventDto) {
+  async registerUserToEvent(eventId: string, dto: RegisterToEventDto, origin?: string) {
     // Verificar que el evento existe y obtener orgId
     const event = await this.model.findById(eventId, { orgId: 1 }).lean();
     if (!event) throw new NotFoundException('Event not found');
@@ -311,6 +313,20 @@ export class EventsService implements OnModuleInit {
       )
       .populate('attendeeId')
       .lean();
+
+    // Fire-and-forget: send welcome email without blocking registration
+    this.emailSendService
+      .sendWelcomeEmail({
+        orgId: event.orgId.toString(),
+        eventId,
+        attendeeId: attendee._id.toString(),
+        eventUserId: eventUser._id.toString(),
+        email: dto.email,
+        origin,
+      })
+      .catch((err) =>
+        this.logger.error('Welcome email failed:', err?.message ?? err),
+      );
 
     return { attendee, eventUser };
   }

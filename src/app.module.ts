@@ -15,6 +15,7 @@ import { AttendanceModule } from './attendance/attendance.module';
 import { UsersModule } from './users/users.module';
 import { MailModule } from './mail/mail.module';
 import { LivekitModule } from './livekit/livekit.module';
+import { EventEmailModule } from './event-email/event-email.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { LivekitModule } from './livekit/livekit.module';
     UsersModule,
     MailModule,
     LivekitModule,
+    EventEmailModule,
   ],
   providers: [
     {

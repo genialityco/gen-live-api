@@ -4,6 +4,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Patch,
   Post,
@@ -51,8 +52,9 @@ export class EventsController {
   async registerToEvent(
     @Param('eventId') eventId: string,
     @Body() dto: RegisterToEventDto,
+    @Headers('origin') origin?: string,
   ) {
-    return this.svc.registerUserToEvent(eventId, dto);
+    return this.svc.registerUserToEvent(eventId, dto, origin);
   }
 
   // Verifica si un usuario ya está registrado en un evento (público)
@@ -119,13 +121,14 @@ export class EventsController {
   async registerWithFirebase(
     @Param('eventId') eventId: string,
     @Body() dto: RegisterToEventDto,
+    @Headers('origin') origin?: string,
   ) {
     if (!dto.firebaseUID) {
       throw new BadRequestException(
         'Firebase UID is required for this endpoint',
       );
     }
-    return this.svc.registerUserToEvent(eventId, dto);
+    return this.svc.registerUserToEvent(eventId, dto, origin);
   }
 
   // Crea EventUser para attendee existente (público)

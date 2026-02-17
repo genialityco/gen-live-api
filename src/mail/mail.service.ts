@@ -109,6 +109,36 @@ export class MailService {
     }
   }
 
+  /**
+   * Sends an email with pre-rendered HTML body (no .hbs template file needed).
+   */
+  async sendRawHtmlEmail(options: {
+    to: string | string[];
+    subject: string;
+    htmlBody: string;
+    fromName?: string;
+  }): Promise<{ messageId: string }> {
+    const { to, subject, htmlBody, fromName } = options;
+
+    const toAddresses = Array.isArray(to) ? to : [to];
+    const source = fromName
+      ? `${fromName} <${this.fromEmail}>`
+      : this.fromEmail;
+
+    const command = new SendEmailCommand({
+      Destination: { ToAddresses: toAddresses },
+      Message: {
+        Body: { Html: { Data: htmlBody, Charset: 'UTF-8' } },
+        Subject: { Data: subject, Charset: 'UTF-8' },
+      },
+      Source: source,
+    });
+
+    const res = await this.sesClient.send(command);
+    this.logger.log(`Email enviado via SES. MessageId=${res.MessageId}`);
+    return { messageId: res.MessageId ?? '' };
+  }
+
   async sendOrgAccessRecoveryEmail(
     options: OrgAccessRecoveryEmailOptions,
   ): Promise<void> {
