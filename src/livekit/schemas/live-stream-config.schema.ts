@@ -46,8 +46,8 @@ export class LiveStreamConfig {
   @Prop({ default: '' })
   lastError: string;
 
-  @Prop({ default: 'gcore' })
-  provider: 'gcore' | 'mux';
+  @Prop({ enum: ['gcore', 'mux', 'vimeo'], default: 'gcore' })
+  provider: 'gcore' | 'mux' | 'vimeo';
 
   @Prop({ default: '' })
   providerStreamId: string; // en mux: live_stream_id

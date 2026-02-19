@@ -36,12 +36,21 @@ export class LiveConfigService {
     );
   }
 
+  private isVimeoUrl(
+    cfg: Pick<LiveStreamConfig, 'rtmpServerUrl' | 'playbackHlsUrl'>,
+  ) {
+    return (
+      /vimeo\.com/i.test(cfg.rtmpServerUrl || '') ||
+      /vimeo\.com/i.test(cfg.playbackHlsUrl || '')
+    );
+  }
+
   /**
    * Reprovisiona Mux si el config está vacío o apunta a Gcore.
-   * NO reprovisiona solo porque falta playback si ya es Mux (evita crear streams innecesarios).
+   * NO reprovisiona si ya es Mux o Vimeo (credenciales manuales).
    */
   async getOrCreate(eventSlug: string) {
-    // 1) crea doc si no existe (upsert suave)
+    // 1) crea doc si no existe
     let cfg = await this.model.findOne({ eventSlug });
 
     if (!cfg) {
@@ -51,13 +60,14 @@ export class LiveConfigService {
         layout: 'speaker',
         maxParticipants: 20,
         status: 'idle',
-        provider: 'mux', // si ya migraste, lo razonable es default mux
+        provider: 'mux',
       });
     }
 
-    // 2) Normaliza provider si las URLs dicen lo contrario (para coherencia)
+    // 2) Normaliza provider según las URLs (para coherencia con credenciales manuales)
     const urlSaysMux = this.isMuxUrl(cfg);
     const urlSaysGcore = this.isGcoreUrl(cfg);
+    const urlSaysVimeo = this.isVimeoUrl(cfg);
 
     if (urlSaysMux && cfg.provider !== 'mux') {
       await this.model.updateOne({ eventSlug }, { $set: { provider: 'mux' } });
@@ -68,12 +78,18 @@ export class LiveConfigService {
         { $set: { provider: 'gcore' } },
       );
       cfg.provider = 'gcore' as any;
+    } else if (urlSaysVimeo && cfg.provider !== 'vimeo') {
+      await this.model.updateOne(
+        { eventSlug },
+        { $set: { provider: 'vimeo' } },
+      );
+      cfg.provider = 'vimeo' as any;
     }
 
-    // 3) Decide reprovision:
-    // - si provider es gcore o urls gcore => reprovision mux
-    // - si faltan credenciales y NO parece mux => reprovision mux
-    // - si ya parece mux, no crees streams nuevos solo porque falta algo: mejor dejar que lo editen o error controlado
+    // 3) Si el proveedor es Vimeo, no reprovisionamos (credenciales manuales)
+    if ((cfg.provider as string) === 'vimeo') return cfg;
+
+    // 4) Decide reprovision solo para Mux/Gcore:
     const missingBasics =
       !cfg.rtmpServerUrl || !cfg.rtmpStreamKey || !cfg.playbackHlsUrl;
 
@@ -84,9 +100,7 @@ export class LiveConfigService {
 
     if (!shouldReprovisionMux) return cfg;
 
-    // 4) Reprovision con guardado atómico (minimiza duplicados)
-    // Nota: no es un lock perfecto, pero reduce muchísimo duplicados:
-    // volvemos a leer antes de crear, por si otro request ya lo hizo.
+    // 5) Reprovision con guardado atómico (minimiza duplicados)
     const fresh = await this.model.findOne({ eventSlug });
     const freshSaysMux = fresh ? this.isMuxUrl(fresh) : false;
     if (

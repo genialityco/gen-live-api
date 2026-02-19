@@ -90,8 +90,7 @@ export class LivekitEgressService {
           throw new BadRequestException('RTMP no configurado para este evento');
         }
 
-        let rtmpUrl = `${base}/${key}`;
-        rtmpUrl += rtmpUrl.includes('?') ? '&live=1' : '?live=1';
+        const rtmpUrl = `${base}/${key}`;
 
         output.protocol = StreamProtocol.RTMP;
         output.urls = [rtmpUrl];
