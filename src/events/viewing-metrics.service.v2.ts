@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-base-to-string */
@@ -45,6 +46,63 @@ export class ViewingMetricsService {
   ) {
     // Limpiar caché de UIDs desconocidos cada 15 minutos
     setInterval(() => this.cleanUnknownUIDsCache(), 15 * 60 * 1000);
+  }
+
+  /**
+   * Persiste métricas concurrentes de forma atómica — núcleo de la actualización.
+   *
+   * Elimina el patrón fetch → modify → save (hot doc) usando findOneAndUpdate:
+   *   $set   → currentConcurrentViewers + lastUpdate
+   *   $max   → peakConcurrentViewers (solo sube, nunca baja)
+   *   upsert → crea el documento si no existe
+   *
+   * Las escrituras RTDB (setNowCount + publishMetrics) ocurren UNA SOLA VEZ
+   * por llamada, garantizando que el frontend recibe exactamente 1 update por
+   * ventana de flush del watcher (no 1 por heartbeat).
+   *
+   * @param eventId            - ID del evento
+   * @param uniqueEventUserIds - Set de _id de EventUser activos (ya resuelto, sin query extra)
+   */
+  private async _persistMetrics(
+    eventId: string,
+    uniqueEventUserIds: Set<string>,
+  ): Promise<{ currentConcurrent: number; uniqueEventUsers: number }> {
+    const currentConcurrent = uniqueEventUserIds.size;
+
+    // Upsert atómico: evita contención sobre el mismo doc (WiredTiger hot doc)
+    const metrics = await this.eventMetricsModel
+      .findOneAndUpdate(
+        { eventId },
+        {
+          $set: {
+            currentConcurrentViewers: currentConcurrent,
+            lastUpdate: new Date(),
+          },
+          // $max actualiza peakConcurrentViewers solo si currentConcurrent es mayor
+          $max: { peakConcurrentViewers: currentConcurrent },
+          // $setOnInsert solo se aplica cuando se crea el documento (upsert)
+          $setOnInsert: { totalUniqueViewers: 0 },
+        },
+        { upsert: true, new: true },
+      )
+      .lean()
+      .exec();
+
+    const peak = metrics?.peakConcurrentViewers ?? currentConcurrent;
+    const total = metrics?.totalUniqueViewers ?? 0;
+
+    // Escrituras RTDB — una vez por flush, no una por heartbeat
+    await this.rtdbService.setNowCount(eventId, currentConcurrent);
+    await this.rtdbService.publishMetrics(eventId, {
+      currentConcurrentViewers: currentConcurrent,
+      peakConcurrentViewers: peak,
+      totalUniqueViewers: total,
+    });
+
+    return {
+      currentConcurrent,
+      uniqueEventUsers: uniqueEventUserIds.size,
+    };
   }
 
   /**
@@ -124,7 +182,7 @@ export class ViewingMetricsService {
 
     // Alerta si hay demasiados usuarios sin registro (posible problema)
     const totalUIDs = uidsToCheck.length;
-    const registeredCount = totalUIDs - unknownUIDs.length;
+    // const registeredCount = totalUIDs - unknownUIDs.length;
     if (unknownUIDs.length > 0 && totalUIDs > 10) {
       const unknownPercentage = (unknownUIDs.length / totalUIDs) * 100;
       if (unknownPercentage > 30) {
@@ -140,8 +198,8 @@ export class ViewingMetricsService {
       .map(([uid]) => uid);
 
     if (registeredUIDs.length === 0) {
-      // No hay usuarios registrados para procesar
-      await this.updateConcurrentViewers(eventId, []);
+      // No hay usuarios registrados — persistir 0 concurrentes sin query adicional
+      await this._persistMetrics(eventId, new Set());
       return;
     }
 
@@ -236,17 +294,24 @@ export class ViewingMetricsService {
       );
     }
 
-    // Actualizar concurrentes con los UIDs activos en RTDB
-    const activeUIDsForUpdate = Object.entries(presenceData)
-      .filter(([, data]) => data.on)
-      .map(([uid]) => uid);
+    // Calcular concurrentes desde el eventUserMap ya resuelto — sin double-query.
+    // registeredUIDs = UIDs activos (on:true) que tienen EventUser en Mongo.
+    // Mapeamos directamente a sus _id sin emitir ningún query adicional.
+    const activeEventUserIds = new Set<string>(
+      registeredUIDs.map((uid) => eventUserMap.get(uid)!._id.toString()),
+    );
 
-    await this.updateConcurrentViewers(eventId, activeUIDsForUpdate);
+    await this._persistMetrics(eventId, activeEventUserIds);
   }
 
   /**
-   * Calcular espectadores concurrentes desde datos de presencia RTDB
-   * Recibe los UIDs activos directamente desde Firebase y consolida por EventUser
+   * Calcular espectadores concurrentes desde UIDs de Firebase y persistir métricas.
+   *
+   * Mantenido para compatibilidad con endSession() y callers externos.
+   * La ruta caliente (onPresenceChange) llama directamente a _persistMetrics()
+   * con los EventUser IDs ya resueltos, evitando la query adicional.
+   *
+   * @param activeFirebaseUIDs - UIDs activos en RTDB. Array vacío = 0 concurrentes.
    */
   async updateConcurrentViewers(
     eventId: string,
@@ -254,70 +319,18 @@ export class ViewingMetricsService {
   ) {
     let uniqueEventUsers: Set<string>;
 
-    // IMPORTANTE: Si activeFirebaseUIDs es un array (incluso vacío),
-    // significa que tenemos datos de RTDB y debemos confiar en ellos.
-    // Solo usar ViewingSessions si activeFirebaseUIDs es undefined/null
-
     if (activeFirebaseUIDs.length > 0) {
-      // Hay usuarios activos en RTDB
-
       const eventUsers = await this.eventUserModel
-        .find(
-          {
-            eventId,
-            firebaseUID: { $in: activeFirebaseUIDs },
-          },
-          { _id: 1 }, // Solo proyectar el campo necesario
-        )
+        .find({ eventId, firebaseUID: { $in: activeFirebaseUIDs } }, { _id: 1 })
         .lean()
         .exec();
-
       uniqueEventUsers = new Set(eventUsers.map((eu) => eu._id.toString()));
     } else {
-      // Array vacío = No hay usuarios activos en RTDB
-      // Esto es correcto, no buscar en ViewingSessions
+      // Array vacío = sin usuarios activos en RTDB
       uniqueEventUsers = new Set();
     }
 
-    const currentConcurrent = uniqueEventUsers.size;
-
-    // Actualizar o crear métricas
-    let metrics = await this.eventMetricsModel.findOne({ eventId });
-
-    if (!metrics) {
-      metrics = new this.eventMetricsModel({
-        eventId,
-        currentConcurrentViewers: currentConcurrent,
-        peakConcurrentViewers: currentConcurrent,
-        totalUniqueViewers: 0,
-        lastUpdate: new Date(),
-      });
-    } else {
-      metrics.currentConcurrentViewers = currentConcurrent;
-      metrics.lastUpdate = new Date();
-
-      // Actualizar pico si es necesario
-      if (currentConcurrent > metrics.peakConcurrentViewers) {
-        metrics.peakConcurrentViewers = currentConcurrent;
-      }
-    }
-
-    await metrics.save();
-
-    // Actualizar nowCount en RTDB para el frontend (legacy)
-    await this.rtdbService.setNowCount(eventId, currentConcurrent);
-
-    // Publicar métricas simplificadas en tiempo real
-    await this.rtdbService.publishMetrics(eventId, {
-      currentConcurrentViewers: currentConcurrent,
-      peakConcurrentViewers: metrics.peakConcurrentViewers,
-      totalUniqueViewers: metrics.totalUniqueViewers,
-    });
-
-    return {
-      currentConcurrent,
-      uniqueEventUsers: uniqueEventUsers.size,
-    };
+    return this._persistMetrics(eventId, uniqueEventUsers);
   }
 
   /**
@@ -357,32 +370,17 @@ export class ViewingMetricsService {
   }
 
   /**
-   * Calcular métricas totales del evento
-   * Solo cuenta usuarios únicos que estuvieron durante el live (wasLiveDuringSession = true)
+   * Calcular métricas totales del evento.
+   * Solo cuenta usuarios únicos que estuvieron durante el live (wasLiveDuringSession = true).
+   *
+   * Usa findOneAndUpdate atómico para evitar contención sobre el documento caliente.
+   * Solo actualiza totalUniqueViewers y lastUpdate; no toca currentConcurrent ni peak.
    */
   async calculateEventMetrics(eventId: string) {
-    let metrics = await this.eventMetricsModel.findOne({ eventId });
-
-    if (!metrics) {
-      metrics = new this.eventMetricsModel({
-        eventId,
-        currentConcurrentViewers: 0,
-        peakConcurrentViewers: 0,
-        totalUniqueViewers: 0,
-        lastUpdate: new Date(),
-      });
-    }
-
     // Obtener todas las sesiones que estuvieron durante el live
     // Solo proyectar el campo necesario para reducir memoria
     const liveSessions = await this.viewingSessionModel
-      .find(
-        {
-          eventId,
-          wasLiveDuringSession: true, // Solo contar quien estuvo durante el live
-        },
-        { eventUserId: 1 }, // Solo necesitamos el eventUserId
-      )
+      .find({ eventId, wasLiveDuringSession: true }, { eventUserId: 1 })
       .lean()
       .exec();
 
@@ -391,20 +389,34 @@ export class ViewingMetricsService {
       liveSessions.map((s) => s.eventUserId.toString()),
     );
 
-    // Total de usuarios únicos que estuvieron en algún momento del live
-    metrics.totalUniqueViewers = uniqueEventUsers.size;
-    metrics.lastUpdate = new Date();
-
-    await metrics.save();
+    // Upsert atómico — solo toca totalUniqueViewers y lastUpdate
+    const updated = await this.eventMetricsModel
+      .findOneAndUpdate(
+        { eventId },
+        {
+          $set: {
+            totalUniqueViewers: uniqueEventUsers.size,
+            lastUpdate: new Date(),
+          },
+          // Inicializar los otros campos solo si se crea el documento
+          $setOnInsert: {
+            currentConcurrentViewers: 0,
+            peakConcurrentViewers: 0,
+          },
+        },
+        { upsert: true, new: true },
+      )
+      .lean()
+      .exec();
 
     // Publicar métricas simplificadas a RTDB
     await this.rtdbService.publishMetrics(eventId, {
-      currentConcurrentViewers: metrics.currentConcurrentViewers,
-      peakConcurrentViewers: metrics.peakConcurrentViewers,
-      totalUniqueViewers: metrics.totalUniqueViewers,
+      currentConcurrentViewers: updated?.currentConcurrentViewers ?? 0,
+      peakConcurrentViewers: updated?.peakConcurrentViewers ?? 0,
+      totalUniqueViewers: uniqueEventUsers.size,
     });
 
-    return metrics;
+    return updated;
   }
 
   /**

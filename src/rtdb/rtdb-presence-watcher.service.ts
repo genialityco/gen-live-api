@@ -7,36 +7,155 @@ import * as admin from 'firebase-admin';
 
 type DetachFn = () => void;
 
+/**
+ * RtdbPresenceWatcherService — versión incremental (sin once('value') en hot path)
+ *
+ * ARQUITECTURA ANTERIOR (O(N) por heartbeat):
+ *   child_* → ref.once('value')  ← RTDB read completo por cada heartbeat
+ *           → onPresenceChange()
+ *
+ * ARQUITECTURA NUEVA (O(1) por heartbeat):
+ *   child_added/changed → actualiza Map en memoria → scheduleFlush (debounce 2 s)
+ *   child_removed       → borra entrada en Map     → scheduleFlush (debounce 2 s)
+ *   flush               → construye presenceData desde Map (SIN leer RTDB)
+ *                       → llama onPresenceChange() UNA vez por ventana
+ *
+ * El único once('value') ocurre en watch() al activar el watcher (seed inicial),
+ * NO en la ruta caliente de cada heartbeat.
+ */
 @Injectable()
 export class RtdbPresenceWatcherService implements OnModuleDestroy {
   private readonly log = new Logger(RtdbPresenceWatcherService.name);
-  private listeners = new Map<string, DetachFn>(); // eventId -> detach
-  private viewingMetricsService: any; // Lazy-loaded para evitar circular dependency
 
-  // Throttling: evitar procesar demasiado frecuentemente
-  private lastProcessed = new Map<string, number>(); // eventId -> timestamp
-  private readonly PROCESS_THROTTLE_MS = 3000; // Procesar máximo cada 3 segundos
-  private pendingProcessing = new Map<string, NodeJS.Timeout>(); // eventId -> timeout
+  // eventId → detach function para limpiar listeners de Firebase
+  private listeners = new Map<string, DetachFn>();
+
+  // Inyección manual para evitar dependencia circular con EventsModule
+  private viewingMetricsService: any;
+
+  // ── In-memory presence mirror ───────────────────────────────────────────
+  // eventId → (uid → { ts, on })
+  // Actualizado directamente por child_* events — nunca lee RTDB en hot path.
+  private presenceCache = new Map<
+    string,
+    Map<string, { ts: number; on: boolean }>
+  >();
+
+  // ── Per-event debounce timers ───────────────────────────────────────────
+  // Colapsa ráfagas de child_* en una sola llamada a onPresenceChange().
+  private flushTimers = new Map<string, NodeJS.Timeout>();
+
+  /** Ventana de debounce: acumula cambios de presencia antes de procesar */
+  private readonly FLUSH_DEBOUNCE_MS = 2_000;
+
+  /** TTL de presencia activa: mismo valor que el frontend usa para heartbeat × 2 */
+  private readonly PRESENCE_TTL_MS = 30_000; // 30 s
+
+  // ── Diagnóstico ─────────────────────────────────────────────────────────
+  // Cuántas veces se ha ejecutado el flush por eventId.
+  // Útil para estimar "escrituras a RTDB ≈ flushCount × 2 (setNowCount + publishMetrics)".
+  private flushCount = new Map<string, number>();
+
+  // ────────────────────────────────────────────────────────────────────────
 
   private presenceRef(eventId: string) {
     return admin.database().ref(`/presence/${eventId}`);
   }
 
-  private nowCountRef(eventId: string) {
-    return admin.database().ref(`/events/${eventId}/nowCount`);
-  }
-
-  /**
-   * Inyección manual para evitar dependencia circular
-   */
+  /** Inyección manual para evitar dependencia circular */
   setViewingMetricsService(service: any) {
     this.viewingMetricsService = service;
   }
 
+  // ── Cache helpers ────────────────────────────────────────────────────────
+
+  private getCacheForEvent(
+    eventId: string,
+  ): Map<string, { ts: number; on: boolean }> {
+    if (!this.presenceCache.has(eventId)) {
+      this.presenceCache.set(eventId, new Map());
+    }
+    return this.presenceCache.get(eventId)!;
+  }
+
   /**
-   * Activa watcher para un eventId (idempotente)
+   * Aplica un cambio de presencia al Map en memoria.
+   * @param data  null indica eliminación (child_removed)
    */
-  async watch(eventId: string) {
+  private updatePresenceCache(eventId: string, uid: string, data: any): void {
+    const cache = this.getCacheForEvent(eventId);
+    if (data === null) {
+      cache.delete(uid);
+      return;
+    }
+    const on: boolean = data?.on ?? false;
+    const ts: number = data?.ts ?? Date.now();
+    cache.set(uid, { ts, on });
+  }
+
+  // ── Flush (debounced) ────────────────────────────────────────────────────
+
+  /**
+   * Programa un flush para eventId con debounce.
+   * Cada llamada cancela el timer anterior → una ráfaga de N child_* events
+   * produce exactamente 1 flush tras FLUSH_DEBOUNCE_MS de inactividad.
+   */
+  private scheduleFlush(eventId: string): void {
+    const existing = this.flushTimers.get(eventId);
+    if (existing) clearTimeout(existing);
+
+    const timer = setTimeout(() => {
+      this.flushTimers.delete(eventId);
+      this.runFlush(eventId).catch((e: Error) =>
+        this.log.error(`Flush error for ${eventId}: ${e.message}`),
+      );
+    }, this.FLUSH_DEBOUNCE_MS);
+
+    this.flushTimers.set(eventId, timer);
+  }
+
+  /**
+   * Ejecuta el flush: construye presenceData desde el Map en memoria (sin RTDB)
+   * y llama a onPresenceChange() UNA sola vez.
+   */
+  private async runFlush(eventId: string): Promise<void> {
+    if (!this.viewingMetricsService) return;
+
+    const cache = this.presenceCache.get(eventId);
+    if (!cache) return;
+
+    const now = Date.now();
+
+    // Construir presenceData filtrando por TTL — SIN lectura a RTDB
+    const presenceData: Record<string, { on: boolean; ts: number }> = {};
+    for (const [uid, entry] of cache.entries()) {
+      if (entry.on && now - entry.ts < this.PRESENCE_TTL_MS) {
+        presenceData[uid] = { on: true, ts: entry.ts };
+      }
+    }
+
+    // Telemetría de flush (cuántas veces por evento)
+    const n = (this.flushCount.get(eventId) ?? 0) + 1;
+    this.flushCount.set(eventId, n);
+    this.log.debug(
+      `[Flush #${n}] event=${eventId} active=${Object.keys(presenceData).length} cached=${cache.size}`,
+    );
+
+    // Una sola llamada a onPresenceChange por ventana de debounce.
+    // Las escrituras RTDB (setNowCount + publishMetrics) ocurren dentro de este método.
+    await this.viewingMetricsService.onPresenceChange(eventId, presenceData);
+  }
+
+  // ── API pública ──────────────────────────────────────────────────────────
+
+  /**
+   * Activa watcher para un eventId (idempotente).
+   *
+   * Firebase child_added dispara para TODOS los hijos existentes al registrar
+   * el listener, por lo que el cache se puebla automáticamente sin necesidad
+   * de un once('value') extra. La ráfaga inicial queda colapsada por el debounce.
+   */
+  watch(eventId: string): void {
     if (this.listeners.has(eventId)) {
       this.log.debug(`Watcher already active for ${eventId}`);
       return;
@@ -44,192 +163,128 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
 
     const ref = this.presenceRef(eventId);
 
-    // Función para procesar y emitir cambios de presencia con timeout
-    const processPresence = async () => {
-      try {
-        // Agregar timeout de 5 segundos a operaciones RTDB
-        const snapPromise = ref.once('value');
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('RTDB timeout')), 5000),
-        );
-        const snap = (await Promise.race([
-          snapPromise,
-          timeoutPromise,
-        ])) as admin.database.DataSnapshot;
-        const val = snap.val() ?? {};
-        const count = typeof val === 'object' ? Object.keys(val).length : 0;
+    // Empezar con cache limpio para este evento
+    this.presenceCache.set(eventId, new Map());
 
-        // Método legacy: actualizar nowCount directamente
-        await this.nowCountRef(eventId).set(count);
+    // ── Handlers incrementales ───────────────────────────────────────────
+    // Cada handler actualiza solo la entrada del uid afectado → O(1) por evento.
+    // El debounce colapsa ráfagas en un único flush.
 
-        // Nuevo método: Enviar datos a ViewingMetricsService si está disponible
-        if (this.viewingMetricsService) {
-          try {
-            const presenceData: Record<string, { on: boolean; ts: number }> =
-              {};
-            const now = Date.now();
-            const TIMEOUT_MS = 30 * 1000; // 30 segundos (2x heartbeat para tolerancia)
-
-            // Convertir estructura RTDB a formato esperado por el servicio
-            // IMPORTANTE: Solo incluir usuarios con on:true y timestamp reciente
-            if (typeof val === 'object' && val !== null) {
-              for (const [uid, data] of Object.entries(val)) {
-                if (typeof data === 'object' && data !== null) {
-                  const on = (data as any).on ?? false;
-                  const ts = (data as any).ts ?? 0;
-
-                  // Solo incluir si está explícitamente "on" Y el timestamp es reciente
-                  if (on && now - ts < TIMEOUT_MS) {
-                    presenceData[uid] = {
-                      on: true,
-                      ts: ts,
-                    };
-                  }
-                }
-              }
-            }
-
-            await this.viewingMetricsService.onPresenceChange(
-              eventId,
-              presenceData,
-            );
-          } catch (error) {
-            this.log.error(
-              `Error processing presence change: ${(error as Error).message}`,
-            );
-          }
-        }
-      } catch (error) {
-        this.log.error(
-          `Error in processPresence for ${eventId}: ${(error as Error).message}`,
-        );
-      }
+    const onChildAdded = (snap: admin.database.DataSnapshot) => {
+      this.updatePresenceCache(eventId, snap.key!, snap.val());
+      this.scheduleFlush(eventId);
     };
 
-    // Función throttled para procesar presencia (evita sobrecarga)
-    const throttledProcess = () => {
-      const now = Date.now();
-      const lastProc = this.lastProcessed.get(eventId) || 0;
-
-      // Si ya procesamos recientemente, programar para después
-      if (now - lastProc < this.PROCESS_THROTTLE_MS) {
-        // Cancelar procesamiento pendiente anterior
-        const pending = this.pendingProcessing.get(eventId);
-        if (pending) {
-          clearTimeout(pending);
-        }
-
-        // Programar nuevo procesamiento
-        const timeout = setTimeout(
-          () => {
-            this.lastProcessed.set(eventId, Date.now());
-            processPresence().catch((e) =>
-              this.log.error(`Throttled process error: ${e.message}`),
-            );
-          },
-          this.PROCESS_THROTTLE_MS - (now - lastProc),
-        );
-
-        this.pendingProcessing.set(eventId, timeout);
-      } else {
-        // Procesar inmediatamente
-        this.lastProcessed.set(eventId, now);
-        processPresence().catch((e) =>
-          this.log.error(`Process error: ${e.message}`),
-        );
-      }
+    const onChildChanged = (snap: admin.database.DataSnapshot) => {
+      this.updatePresenceCache(eventId, snap.key!, snap.val());
+      this.scheduleFlush(eventId);
     };
 
-    // Listeners individuales con throttling
-    const onChildAdded = () => throttledProcess();
-    const onChildRemoved = () => throttledProcess();
-    const onChildChanged = () => throttledProcess();
+    const onChildRemoved = (snap: admin.database.DataSnapshot) => {
+      // null → eliminar del cache
+      this.updatePresenceCache(eventId, snap.key!, null);
+      this.scheduleFlush(eventId);
+    };
 
-    // Asegurar que no hay listeners previos antes de agregar nuevos
+    // Eliminar listeners anteriores (safety) y registrar los nuevos
     ref.off();
-
     ref.on('child_added', onChildAdded);
-    ref.on('child_removed', onChildRemoved);
     ref.on('child_changed', onChildChanged);
+    ref.on('child_removed', onChildRemoved);
 
-    // Procesamiento inicial
-    await processPresence();
-
-    // Guardar función de cleanup mejorada
     this.listeners.set(eventId, () => {
       try {
         ref.off('child_added', onChildAdded);
-        ref.off('child_removed', onChildRemoved);
         ref.off('child_changed', onChildChanged);
+        ref.off('child_removed', onChildRemoved);
         this.log.debug(`Listeners cleaned for ${eventId}`);
-      } catch (error) {
+      } catch (e) {
         this.log.error(
-          `Error cleaning listeners for ${eventId}: ${(error as Error).message}`,
+          `Error cleaning listeners for ${eventId}: ${(e as Error).message}`,
         );
       }
     });
 
-    // Limpiar nodos antiguos antes de empezar
-    this.cleanStalePresence(eventId).catch((e) =>
-      this.log.error(`Error cleaning stale presence: ${e.message}`),
+    this.log.log(
+      `Presence watcher ON for ${eventId} ` +
+        `(incremental, debounce=${this.FLUSH_DEBOUNCE_MS}ms, TTL=${this.PRESENCE_TTL_MS}ms)`,
     );
 
-    this.log.log(
-      `Presence watcher ON for ${eventId} (usando listeners individuales)`,
-    );
+    // Limpiar nodos stale de RTDB de forma asíncrona (no bloquea el hot path)
+    this.cleanStalePresence(eventId).catch(() => {});
   }
 
-  /**
-   * Desactiva watcher si existe
-   */
-  unwatch(eventId: string) {
+  /** Desactiva watcher y libera todos los recursos asociados */
+  unwatch(eventId: string): void {
     const detach = this.listeners.get(eventId);
     if (detach) {
       detach();
       this.listeners.delete(eventId);
 
-      // Limpiar throttling data
-      this.lastProcessed.delete(eventId);
-      const pending = this.pendingProcessing.get(eventId);
-      if (pending) {
-        clearTimeout(pending);
-        this.pendingProcessing.delete(eventId);
+      // Cancelar flush pendiente
+      const timer = this.flushTimers.get(eventId);
+      if (timer) {
+        clearTimeout(timer);
+        this.flushTimers.delete(eventId);
       }
+
+      // Liberar cache en memoria
+      this.presenceCache.delete(eventId);
+      this.flushCount.delete(eventId);
+
       this.log.log(`Presence watcher OFF for ${eventId}`);
     }
   }
 
-  /**
-   * Limpieza al cerrar el proceso Nest
-   */
-  onModuleDestroy() {
+  /** Limpieza al cerrar el proceso NestJS */
+  onModuleDestroy(): void {
     for (const [eventId, detach] of this.listeners.entries()) {
       try {
         detach();
       } catch {
         /* empty */
       }
+      const timer = this.flushTimers.get(eventId);
+      if (timer) clearTimeout(timer);
       this.log.log(`Presence watcher OFF (shutdown) for ${eventId}`);
     }
     this.listeners.clear();
+    this.presenceCache.clear();
+    this.flushTimers.clear();
   }
 
   /**
-   * Recalcular bajo demanda (endpoint opcional)
+   * Recalcular bajo demanda — OK usar once('value') aquí, es on-demand.
+   * (endpoint opcional de diagnóstico/admin)
    */
   async recalcNow(eventId: string) {
     try {
-      const snapPromise = this.presenceRef(eventId).once('value');
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('RTDB timeout')), 5000),
-      );
-      const snap = (await Promise.race([
-        snapPromise,
-        timeoutPromise,
-      ])) as admin.database.DataSnapshot;
+      const snap = await Promise.race([
+        this.presenceRef(eventId).once('value'),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('RTDB timeout')), 5000),
+        ),
+      ]);
       const val = snap.val() ?? {};
       const count = typeof val === 'object' ? Object.keys(val).length : 0;
-      await this.nowCountRef(eventId).set(count);
+      await admin.database().ref(`/events/${eventId}/nowCount`).set(count);
+
+      // Sincronizar cache con el estado real de RTDB
+      if (this.presenceCache.has(eventId)) {
+        const cache = this.presenceCache.get(eventId)!;
+        cache.clear();
+        if (typeof val === 'object' && val !== null) {
+          for (const [uid, data] of Object.entries(val)) {
+            const on: boolean = (data as any)?.on ?? false;
+            const ts: number = (data as any)?.ts ?? Date.now();
+            cache.set(uid, { ts, on });
+          }
+        }
+        this.log.debug(
+          `recalcNow: resync cache for ${eventId} (${cache.size} entries)`,
+        );
+      }
+
       return { eventId, nowCount: count };
     } catch (error) {
       this.log.error(
@@ -240,18 +295,17 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
   }
 
   /**
-   * Limpiar nodos de presencia antiguos (más de 2 minutos sin actualizar)
+   * Limpiar nodos de presencia antiguos en RTDB (on-demand, no hot path).
+   * También sincroniza el cache en memoria.
    */
   async cleanStalePresence(eventId: string) {
     try {
-      const snapPromise = this.presenceRef(eventId).once('value');
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('RTDB timeout')), 5000),
-      );
-      const snap = (await Promise.race([
-        snapPromise,
-        timeoutPromise,
-      ])) as admin.database.DataSnapshot;
+      const snap = await Promise.race([
+        this.presenceRef(eventId).once('value'),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('RTDB timeout')), 5000),
+        ),
+      ]);
       const val = snap.val() ?? {};
 
       if (typeof val !== 'object' || val === null) {
@@ -261,19 +315,17 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
       const now = Date.now();
       const STALE_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutos
       let cleaned = 0;
+      const cache = this.presenceCache.get(eventId);
 
       for (const [uid, data] of Object.entries(val)) {
-        if (typeof data === 'object' && data !== null) {
-          const ts = (data as any).ts ?? 0;
-
-          // Eliminar si el timestamp es muy antiguo
-          if (now - ts > STALE_TIMEOUT_MS) {
-            await this.presenceRef(eventId).child(uid).remove();
-            cleaned++;
-            this.log.debug(
-              `Cleaned stale presence node for UID ${uid} in event ${eventId}`,
-            );
-          }
+        const ts = (data as any)?.ts ?? 0;
+        if (now - ts > STALE_TIMEOUT_MS) {
+          await this.presenceRef(eventId).child(uid).remove();
+          cache?.delete(uid); // Sincronizar cache
+          cleaned++;
+          this.log.debug(
+            `Cleaned stale presence for UID ${uid} in event ${eventId}`,
+          );
         }
       }
 
@@ -283,9 +335,30 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
       return { cleaned };
     } catch (error) {
       this.log.error(
-        `Error in cleanStalePresence for ${eventId}: ${(error as Error).message}`,
+        `Error in cleanStalePresence: ${(error as Error).message}`,
       );
       return { cleaned: 0, error: (error as Error).message };
     }
+  }
+
+  /**
+   * Estadísticas de flush por evento (endpoint de diagnóstico).
+   *
+   * Permite validar:
+   *   - cuántas veces por minuto corre el flush por eventId
+   *   - cuántas escrituras RTDB ≈ flushCount × 2 (setNowCount + publishMetrics)
+   *   - cuántos UIDs están en cache por evento
+   */
+  getFlushStats() {
+    return {
+      flushCounts: Object.fromEntries(this.flushCount),
+      activeWatchers: this.listeners.size,
+      cachedEvents: [...this.presenceCache.keys()].map((eventId) => ({
+        eventId,
+        cachedUIDs: this.presenceCache.get(eventId)?.size ?? 0,
+      })),
+      debounceMs: this.FLUSH_DEBOUNCE_MS,
+      presenceTtlMs: this.PRESENCE_TTL_MS,
+    };
   }
 }
