@@ -639,11 +639,12 @@ export class EventsService implements OnModuleInit {
     }
 
     // Update EventUser with Firebase UID
-
+    // Usar $in para manejar attendeeId almacenado como ObjectId o como string (inconsistencia legacy)
+    const attendeeObjectId = new Types.ObjectId(attendee._id.toString());
     const eventUser = await this.eventUserModel.findOneAndUpdate(
       {
         eventId,
-        attendeeId: attendee._id, // Mongoose handles ObjectId comparison automatically
+        attendeeId: { $in: [attendeeObjectId, attendee._id.toString()] },
       },
       {
         firebaseUID,

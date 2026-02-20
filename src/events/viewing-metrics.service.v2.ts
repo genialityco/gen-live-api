@@ -31,7 +31,9 @@ export class ViewingMetricsService {
     { eventId: string; lastWarned: number }
   >();
   private readonly UNKNOWN_UID_WARNING_COOLDOWN = 5 * 60 * 1000; // 5 minutos entre warnings
-  private readonly UNKNOWN_UID_CACHE_TTL = 30 * 60 * 1000; // 30 minutos de caché
+  // TTL corto: el UID puede llegar antes de que associateFirebaseUID complete (race condition).
+  // Con 30s, el próximo flush re-chequea si la asociación ya ocurrió.
+  private readonly UNKNOWN_UID_CACHE_TTL = 30 * 1000; // 30 segundos de caché
 
   constructor(
     @InjectModel(ViewingSession.name)
@@ -562,5 +564,22 @@ export class ViewingMetricsService {
       total: this.unknownUIDs.size,
       byEvent: Object.fromEntries(statsByEvent),
     };
+  }
+
+  /**
+   * Limpiar el cache de UIDs desconocidos para un evento específico.
+   * Útil en producción cuando el cache bloqueó el conteo de asistentes.
+   * Después de esto, el próximo flush re-chequeará todos los UIDs contra EventUser.
+   */
+  clearUnknownUIDsForEvent(eventId: string): { cleared: number } {
+    let cleared = 0;
+    for (const key of this.unknownUIDs.keys()) {
+      if (key.startsWith(`${eventId}:`)) {
+        this.unknownUIDs.delete(key);
+        cleared++;
+      }
+    }
+    this.logger.log(`Cleared ${cleared} unknown UID cache entries for event ${eventId}`);
+    return { cleared };
   }
 }

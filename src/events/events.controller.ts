@@ -298,6 +298,22 @@ export class EventsController {
     return await this.metricsService.calculateEventMetrics(eventId);
   }
 
+  /**
+   * Limpiar el cache de UIDs desconocidos para un evento.
+   * Usar cuando las métricas muestren 0 aunque haya asistentes en Firebase RTDB.
+   * Después de llamar esto, el próximo heartbeat (~15s) actualizará las métricas.
+   */
+  @Post(':eventId/metrics/reset-uid-cache')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async resetUnknownUIDCache(@Param('eventId') eventId: string) {
+    const result = this.metricsService.clearUnknownUIDsForEvent(eventId);
+    return {
+      ok: true,
+      message: `Cache limpiado. Las métricas se actualizarán en el próximo heartbeat (~15s).`,
+      ...result,
+    };
+  }
+
   // ENDPOINTS DE DIAGNÓSTICO Y MANTENIMIENTO
 
   /**
