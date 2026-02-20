@@ -401,8 +401,8 @@ export class MediaLibraryService {
     return result;
   }
 
-  // Generar URL firmada para upload directo a Firebase Storage (archivos grandes)
-  async requestUpload(dto: RequestUploadDto): Promise<{ uploadUrl: string; filePath: string }> {
+  // Reservar path en Firebase Storage para upload directo desde el cliente con Firebase Web SDK
+  async requestUpload(dto: RequestUploadDto): Promise<{ filePath: string }> {
     const allowedMimes = ['video/mp4', 'video/webm', 'video/mpeg'];
     if (!allowedMimes.includes(dto.mimeType)) {
       throw new BadRequestException('Solo se permiten videos (MP4/WEBM/MPEG) para upload directo');
@@ -416,19 +416,11 @@ export class MediaLibraryService {
     const ext =
       dto.mimeType === 'video/mp4' ? 'mp4' : dto.mimeType === 'video/webm' ? 'webm' : 'mpg';
 
-    const bucket = this.firebaseAdmin.storage().bucket();
     const timestamp = Date.now();
     const tempId = `${timestamp}_${Math.random().toString(36).substring(7)}`;
     const filePath = `live-media/${dto.eventSlug}/items/${tempId}.${ext}`;
-    const fileRef = bucket.file(filePath);
 
-    const [signedUrl] = await fileRef.getSignedUrl({
-      action: 'write',
-      expires: Date.now() + 15 * 60 * 1000, // 15 minutos
-      contentType: dto.mimeType,
-    });
-
-    return { uploadUrl: signedUrl, filePath };
+    return { filePath };
   }
 
   // Confirmar upload directo: hacer público + crear documento MongoDB
