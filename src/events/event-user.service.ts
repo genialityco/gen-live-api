@@ -118,7 +118,7 @@ export class EventUserService {
   ) {
     // Verificar que no esté ya registrado
     const existingEventUser = await this.eventUserModel.findOne({
-      attendeeId,
+      attendeeId: { $in: [new Types.ObjectId(attendeeId), attendeeId] },
       eventId,
     });
 
@@ -137,7 +137,7 @@ export class EventUserService {
     }
 
     const eventUser = await this.eventUserModel.create({
-      attendeeId,
+      attendeeId: new Types.ObjectId(attendeeId),
       eventId,
       firebaseUID,
       status: 'registered',
@@ -170,7 +170,7 @@ export class EventUserService {
     console.log('[markAsAttended] raw args:', { attendeeId, eventId });
 
     const filter = {
-      attendeeId: new Types.ObjectId(attendeeId),
+      attendeeId: { $in: [new Types.ObjectId(attendeeId), attendeeId] },
       eventId: String(eventId),
     };
 
