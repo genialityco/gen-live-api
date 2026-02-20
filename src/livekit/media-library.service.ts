@@ -47,6 +47,28 @@ export interface MediaOverrides {
   opacity?: number;
 }
 
+export interface RequestUploadDto {
+  eventSlug: string;
+  name: string;
+  mimeType: string;
+  fileSize: number;
+}
+
+export interface ConfirmUploadDto {
+  filePath: string;
+  eventSlug: string;
+  name: string;
+  mimeType: string;
+  fileSize: number;
+  description?: string;
+  tags?: string[];
+  defaultMode?: 'overlay' | 'full';
+  defaultLoop?: boolean;
+  defaultMuted?: boolean;
+  defaultFit?: 'cover' | 'contain';
+  defaultOpacity?: number;
+}
+
 @Injectable()
 export class MediaLibraryService {
   constructor(
@@ -377,5 +399,70 @@ export class MediaLibraryService {
     }
 
     return result;
+  }
+
+  // Generar URL firmada para upload directo a Firebase Storage (archivos grandes)
+  async requestUpload(dto: RequestUploadDto): Promise<{ uploadUrl: string; filePath: string }> {
+    const allowedMimes = ['video/mp4', 'video/webm', 'video/mpeg'];
+    if (!allowedMimes.includes(dto.mimeType)) {
+      throw new BadRequestException('Solo se permiten videos (MP4/WEBM/MPEG) para upload directo');
+    }
+
+    const maxSize = 1024 * 1024 * 1024; // 1 GB
+    if (dto.fileSize > maxSize) {
+      throw new BadRequestException('Archivo muy grande (máx 1GB)');
+    }
+
+    const ext =
+      dto.mimeType === 'video/mp4' ? 'mp4' : dto.mimeType === 'video/webm' ? 'webm' : 'mpg';
+
+    const bucket = this.firebaseAdmin.storage().bucket();
+    const timestamp = Date.now();
+    const tempId = `${timestamp}_${Math.random().toString(36).substring(7)}`;
+    const filePath = `live-media/${dto.eventSlug}/items/${tempId}.${ext}`;
+    const fileRef = bucket.file(filePath);
+
+    const [signedUrl] = await fileRef.getSignedUrl({
+      action: 'write',
+      expires: Date.now() + 15 * 60 * 1000, // 15 minutos
+      contentType: dto.mimeType,
+    });
+
+    return { uploadUrl: signedUrl, filePath };
+  }
+
+  // Confirmar upload directo: hacer público + crear documento MongoDB
+  async confirmUpload(dto: ConfirmUploadDto, uploadedBy?: string): Promise<MediaItem> {
+    const bucket = this.firebaseAdmin.storage().bucket();
+    const fileRef = bucket.file(dto.filePath);
+
+    const [exists] = await fileRef.exists();
+    if (!exists) {
+      throw new NotFoundException('Archivo no encontrado en Storage. El upload puede haber fallado.');
+    }
+
+    await fileRef.makePublic();
+    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${dto.filePath}`;
+
+    const mediaType = dto.mimeType.startsWith('video/') ? 'video' : 'image';
+
+    const item = await this.mediaModel.create({
+      eventSlug: dto.eventSlug,
+      name: dto.name,
+      type: mediaType,
+      url: publicUrl,
+      description: dto.description || '',
+      tags: dto.tags || [],
+      fileSize: dto.fileSize,
+      mimeType: dto.mimeType,
+      uploadedBy: uploadedBy || '',
+      defaultMode: dto.defaultMode || 'full',
+      defaultLoop: dto.defaultLoop ?? false,
+      defaultMuted: dto.defaultMuted ?? true,
+      defaultFit: dto.defaultFit || 'cover',
+      defaultOpacity: dto.defaultOpacity ?? 1,
+    });
+
+    return item.toObject();
   }
 }

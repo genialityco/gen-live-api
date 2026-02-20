@@ -27,6 +27,7 @@ import {
   Min,
   Max,
   IsArray,
+  IsPositive,
 } from 'class-validator';
 import * as mediaLibraryService from './media-library.service';
 import { FirebaseAuthGuard } from 'src/common/guards/firebase-auth.guard';
@@ -114,6 +115,70 @@ export class ActivateMediaDto {
 
   @IsOptional()
   overrides?: mediaLibraryService.MediaOverrides;
+}
+
+export class RequestUploadBodyDto {
+  @IsString()
+  eventSlug: string;
+
+  @IsString()
+  name: string;
+
+  @IsString()
+  mimeType: string;
+
+  @IsNumber()
+  @IsPositive()
+  fileSize: number;
+}
+
+export class ConfirmUploadBodyDto {
+  @IsString()
+  filePath: string;
+
+  @IsString()
+  eventSlug: string;
+
+  @IsString()
+  name: string;
+
+  @IsString()
+  mimeType: string;
+
+  @IsNumber()
+  @IsPositive()
+  fileSize: number;
+
+  @IsOptional()
+  @IsString()
+  description?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
+
+  @IsOptional()
+  @IsEnum(['overlay', 'full'])
+  defaultMode?: 'overlay' | 'full';
+
+  @IsOptional()
+  @IsBoolean()
+  defaultLoop?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  defaultMuted?: boolean;
+
+  @IsOptional()
+  @IsEnum(['cover', 'contain'])
+  defaultFit?: 'cover' | 'contain';
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1)
+  defaultOpacity?: number;
 }
 
 @Controller('livekit/media-library')
@@ -244,5 +309,24 @@ export class MediaLibraryController {
     }
     await this.service.deactivate(body.eventSlug, body.type || 'all');
     return { ok: true };
+  }
+
+  // POST /livekit/media-library/request-upload
+  // Genera URL firmada para que el cliente suba directamente a Firebase Storage
+  @Post('request-upload')
+  @UseGuards(FirebaseAuthGuard)
+  async requestUpload(@Body() body: RequestUploadBodyDto) {
+    const result = await this.service.requestUpload(body);
+    return result;
+  }
+
+  // POST /livekit/media-library/confirm-upload
+  // Confirma que el archivo ya está en Firebase Storage y crea el documento en MongoDB
+  @Post('confirm-upload')
+  @UseGuards(FirebaseAuthGuard)
+  async confirmUpload(@Req() req: any, @Body() body: ConfirmUploadBodyDto) {
+    const uid = req.user?.uid;
+    const item = await this.service.confirmUpload(body, uid);
+    return { ok: true, item };
   }
 }
