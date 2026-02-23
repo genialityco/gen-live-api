@@ -12,6 +12,17 @@ import { MuxService } from './mux.service';
 export class LiveConfigService {
   private readonly log = new Logger(LiveConfigService.name);
 
+  /**
+   * Caché en memoria para LiveStreamConfig por eventSlug.
+   * Reduce las queries a MongoDB cuando N usuarios solicitan la URL de playback
+   * de forma simultánea (p.ej. al inicio del evento con 1500 asistentes).
+   */
+  private readonly configCache = new Map<
+    string,
+    { cfg: LiveStreamConfig; expiresAt: number }
+  >();
+  private readonly CONFIG_CACHE_TTL_MS = 30_000; // 30 segundos
+
   constructor(
     @InjectModel(LiveStreamConfig.name)
     private readonly model: Model<LiveStreamConfigDocument>,
@@ -138,6 +149,8 @@ export class LiveConfigService {
   }
 
   async update(eventSlug: string, patch: Partial<LiveStreamConfig>) {
+    // Invalidar caché al modificar para que el próximo get() lea el valor actualizado
+    this.configCache.delete(eventSlug);
     return this.model.findOneAndUpdate(
       { eventSlug },
       { $set: { ...patch, eventSlug } },
@@ -146,8 +159,19 @@ export class LiveConfigService {
   }
 
   async get(eventSlug: string) {
+    // Servir desde caché si está vigente (evita N queries simultáneas al mismo doc)
+    const cached = this.configCache.get(eventSlug);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.cfg;
+    }
+
     const cfg = await this.model.findOne({ eventSlug }).lean();
     if (!cfg) throw new NotFoundException('Live config no existe');
+
+    this.configCache.set(eventSlug, {
+      cfg,
+      expiresAt: Date.now() + this.CONFIG_CACHE_TTL_MS,
+    });
     return cfg;
   }
 }

@@ -48,6 +48,13 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
   /** Ventana de debounce: acumula cambios de presencia antes de procesar */
   private readonly FLUSH_DEBOUNCE_MS = 2_000;
 
+  /**
+   * Tiempo máximo de espera antes de forzar un flush aunque sigan llegando eventos.
+   * Evita starvation cuando 1500+ usuarios llegan en burst: sin este límite, cada
+   * child_added resetea el timer y el flush puede tardar 10-15 s en disparar.
+   */
+  private readonly FLUSH_MAX_WAIT_MS = 5_000;
+
   /** TTL de presencia activa: mismo valor que el frontend usa para heartbeat × 2 */
   private readonly PRESENCE_TTL_MS = 30_000; // 30 s
 
@@ -55,6 +62,11 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
   // Cuántas veces se ha ejecutado el flush por eventId.
   // Útil para estimar "escrituras a RTDB ≈ flushCount × 2 (setNowCount + publishMetrics)".
   private flushCount = new Map<string, number>();
+
+  // Timestamp en que se programó el primer scheduleFlush para cada eventId.
+  // Usado para implementar el maxWait: si el debounce lleva más de FLUSH_MAX_WAIT_MS
+  // esperando, se fuerza el flush aunque sigan llegando eventos.
+  private flushFirstScheduled = new Map<string, number>();
 
   // ────────────────────────────────────────────────────────────────────────
 
@@ -96,16 +108,47 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
   // ── Flush (debounced) ────────────────────────────────────────────────────
 
   /**
-   * Programa un flush para eventId con debounce.
-   * Cada llamada cancela el timer anterior → una ráfaga de N child_* events
-   * produce exactamente 1 flush tras FLUSH_DEBOUNCE_MS de inactividad.
+   * Programa un flush para eventId con debounce + maxWait.
+   *
+   * Comportamiento:
+   * - Cada llamada reinicia el timer de FLUSH_DEBOUNCE_MS (trailing debounce clásico).
+   * - Si el debounce lleva más de FLUSH_MAX_WAIT_MS esperando sin disparar (p.ej. burst
+   *   de 1500 child_added consecutivos), se fuerza el flush de inmediato para evitar
+   *   que las métricas tarden 10-15 s en aparecer al inicio del evento.
    */
   private scheduleFlush(eventId: string): void {
+    const now = Date.now();
+
+    // Registrar cuándo se programó por primera vez en esta ráfaga
+    if (!this.flushFirstScheduled.has(eventId)) {
+      this.flushFirstScheduled.set(eventId, now);
+    }
+
+    const firstScheduled = this.flushFirstScheduled.get(eventId)!;
+
+    // Si ya pasó el maxWait → forzar flush inmediato sin esperar más
+    if (now - firstScheduled >= this.FLUSH_MAX_WAIT_MS) {
+      const existing = this.flushTimers.get(eventId);
+      if (existing) clearTimeout(existing);
+      this.flushTimers.delete(eventId);
+      this.flushFirstScheduled.delete(eventId);
+
+      this.log.debug(
+        `[MaxWait] Forced flush for ${eventId} after ${now - firstScheduled}ms`,
+      );
+      this.runFlush(eventId).catch((e: Error) =>
+        this.log.error(`Forced flush error for ${eventId}: ${e.message}`),
+      );
+      return;
+    }
+
+    // Debounce normal: cancelar timer anterior y programar uno nuevo
     const existing = this.flushTimers.get(eventId);
     if (existing) clearTimeout(existing);
 
     const timer = setTimeout(() => {
       this.flushTimers.delete(eventId);
+      this.flushFirstScheduled.delete(eventId);
       this.runFlush(eventId).catch((e: Error) =>
         this.log.error(`Flush error for ${eventId}: ${e.message}`),
       );
@@ -231,6 +274,7 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
       // Liberar cache en memoria
       this.presenceCache.delete(eventId);
       this.flushCount.delete(eventId);
+      this.flushFirstScheduled.delete(eventId);
 
       this.log.log(`Presence watcher OFF for ${eventId}`);
     }
@@ -251,6 +295,7 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
     this.listeners.clear();
     this.presenceCache.clear();
     this.flushTimers.clear();
+    this.flushFirstScheduled.clear();
   }
 
   /**
@@ -350,14 +395,19 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
    *   - cuántos UIDs están en cache por evento
    */
   getFlushStats() {
+    const now = Date.now();
     return {
       flushCounts: Object.fromEntries(this.flushCount),
       activeWatchers: this.listeners.size,
       cachedEvents: [...this.presenceCache.keys()].map((eventId) => ({
         eventId,
         cachedUIDs: this.presenceCache.get(eventId)?.size ?? 0,
+        pendingFlushWaitMs: this.flushFirstScheduled.has(eventId)
+          ? now - this.flushFirstScheduled.get(eventId)!
+          : null,
       })),
       debounceMs: this.FLUSH_DEBOUNCE_MS,
+      maxWaitMs: this.FLUSH_MAX_WAIT_MS,
       presenceTtlMs: this.PRESENCE_TTL_MS,
     };
   }

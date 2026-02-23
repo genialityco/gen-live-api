@@ -25,6 +25,17 @@ export class ViewingMetricsService {
   private readonly logger = new Logger(ViewingMetricsService.name);
   private readonly PRESENCE_TIMEOUT_SECONDS = 60; // Timeout para considerar desconectado
 
+  /**
+   * Caché del status del evento para evitar un findById en cada flush.
+   * Con debounce de 2s y 1500 usuarios, onPresenceChange puede correr cada 2-5s.
+   * Sin caché, eso sería 12-30 queries/min contra el mismo documento de Event.
+   */
+  private readonly eventStatusCache = new Map<
+    string,
+    { isLive: boolean; expiresAt: number }
+  >();
+  private readonly EVENT_STATUS_CACHE_TTL_MS = 30_000; // 30 segundos
+
   // Cache de UIDs que no tienen EventUser (para evitar queries repetidas y warnings)
   private unknownUIDs = new Map<
     string,
@@ -93,13 +104,17 @@ export class ViewingMetricsService {
     const peak = metrics?.peakConcurrentViewers ?? currentConcurrent;
     const total = metrics?.totalUniqueViewers ?? 0;
 
-    // Escrituras RTDB — una vez por flush, no una por heartbeat
-    await this.rtdbService.setNowCount(eventId, currentConcurrent);
-    await this.rtdbService.publishMetrics(eventId, {
-      currentConcurrentViewers: currentConcurrent,
-      peakConcurrentViewers: peak,
-      totalUniqueViewers: total,
-    });
+    // Escrituras RTDB en paralelo — una vez por flush, no una por heartbeat.
+    // setNowCount y publishMetrics son independientes entre sí, no tiene sentido
+    // esperar una para iniciar la otra.
+    await Promise.all([
+      this.rtdbService.setNowCount(eventId, currentConcurrent),
+      this.rtdbService.publishMetrics(eventId, {
+        currentConcurrentViewers: currentConcurrent,
+        peakConcurrentViewers: peak,
+        totalUniqueViewers: total,
+      }),
+    ]);
 
     return {
       currentConcurrent,
@@ -117,13 +132,29 @@ export class ViewingMetricsService {
     eventId: string,
     presenceData: Record<string, { on: boolean; ts: number }>,
   ) {
-    const event = await this.eventModel.findById(eventId).lean();
-    if (!event) {
-      this.logger.warn(`Event ${eventId} not found`);
-      return;
+    // Resolver isLive desde caché para evitar un findById por cada flush.
+    // La caché expira cada 30s; si el estado cambia (live→ended), se reflejará
+    // en el próximo ciclo de caché a más tardar.
+    let isLive: boolean;
+    const cachedStatus = this.eventStatusCache.get(eventId);
+    if (cachedStatus && Date.now() < cachedStatus.expiresAt) {
+      isLive = cachedStatus.isLive;
+    } else {
+      // Solo proyectar el campo necesario para reducir transferencia de datos
+      const event = await this.eventModel
+        .findById(eventId, { status: 1 })
+        .lean();
+      if (!event) {
+        this.logger.warn(`Event ${eventId} not found`);
+        return;
+      }
+      isLive = event.status === 'live';
+      this.eventStatusCache.set(eventId, {
+        isLive,
+        expiresAt: Date.now() + this.EVENT_STATUS_CACHE_TTL_MS,
+      });
     }
 
-    const isLive = event.status === 'live';
     const now = new Date();
     const nowTimestamp = now.getTime();
 
