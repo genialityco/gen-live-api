@@ -21,7 +21,7 @@ import { EventEmailModule } from './event-email/event-email.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     MongooseModule.forRoot(process.env.MONGO_URI!),
-    ThrottlerModule.forRoot([{ ttl: 60, limit: 60 }]),
+    ThrottlerModule.forRoot([{ ttl: 60, limit: 9999 }]),
     AuthModule,
     RtdbModule,
     PeopleModule,
