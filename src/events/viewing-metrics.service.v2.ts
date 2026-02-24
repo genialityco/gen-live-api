@@ -163,7 +163,11 @@ export class ViewingMetricsService {
       .filter(([, data]) => data.on)
       .map(([uid]) => uid);
 
-    if (initialActiveUIDs.length === 0) return;
+    if (initialActiveUIDs.length === 0) {
+      // Todos los usuarios se fueron — resetear contador a 0
+      await this._persistMetrics(eventId, new Set());
+      return;
+    }
 
     // Filtrar UIDs que sabemos que no tienen EventUser (caché)
     const uidsToCheck = initialActiveUIDs.filter((uid) => {
