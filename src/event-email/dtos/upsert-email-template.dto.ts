@@ -15,7 +15,7 @@ export class UpsertEmailTemplateDto {
   @IsString()
   eventId?: string;
 
-  @IsIn(['WELCOME'])
+  @IsIn(['WELCOME', 'INVITATION', 'REMINDER'])
   type: string;
 
   @IsString()

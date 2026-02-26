@@ -16,6 +16,7 @@ import { UsersModule } from './users/users.module';
 import { MailModule } from './mail/mail.module';
 import { LivekitModule } from './livekit/livekit.module';
 import { EventEmailModule } from './event-email/event-email.module';
+import { EmailCampaignModule } from './email-campaign/email-campaign.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { EventEmailModule } from './event-email/event-email.module';
     MailModule,
     LivekitModule,
     EventEmailModule,
+    EmailCampaignModule,
   ],
   providers: [
     {

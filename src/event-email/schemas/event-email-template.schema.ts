@@ -1,7 +1,7 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 
-export type EmailTemplateType = 'WELCOME';
+export type EmailTemplateType = 'WELCOME' | 'INVITATION' | 'REMINDER';
 
 @Schema({ timestamps: true })
 export class EventEmailTemplate {
@@ -11,7 +11,7 @@ export class EventEmailTemplate {
   @Prop({ type: Types.ObjectId, ref: 'Event', default: null })
   eventId?: Types.ObjectId; // null = org-level default
 
-  @Prop({ required: true, enum: ['WELCOME'] })
+  @Prop({ required: true, enum: ['WELCOME', 'INVITATION', 'REMINDER'] })
   type: EmailTemplateType;
 
   @Prop({ required: true })
