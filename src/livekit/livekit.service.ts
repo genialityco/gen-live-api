@@ -98,4 +98,34 @@ export class LivekitService {
     const roomName = this.buildRoomName(eventSlug);
     await this.roomClient.removeParticipant(roomName, identity);
   }
+
+  /**
+   * Actualiza el nombre y/o subtítulo de un participante en tiempo real.
+   * El subtítulo se persiste en el metadata del participante como JSON.
+   * LiveKit propaga el cambio a todos los clientes conectados.
+   */
+  async updateParticipantInfo(
+    eventSlug: string,
+    identity: string,
+    params: { name?: string; subtitle?: string },
+  ) {
+    const roomName = this.buildRoomName(eventSlug);
+    const options: { name?: string; metadata?: string } = {};
+
+    if (params.name !== undefined) {
+      options.name = params.name;
+    }
+    if (params.subtitle !== undefined) {
+      options.metadata = JSON.stringify({ subtitle: params.subtitle });
+    }
+
+    try {
+      await this.roomClient.updateParticipant(roomName, identity, options);
+    } catch (err) {
+      console.error('Error actualizando info del participante:', err);
+      throw new InternalServerErrorException(
+        'No se pudo actualizar la información del participante',
+      );
+    }
+  }
 }

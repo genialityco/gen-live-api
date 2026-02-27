@@ -16,6 +16,7 @@ import {
   UploadedFile,
   UseInterceptors,
   Delete,
+  Patch,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { IsIn, IsOptional, IsString } from 'class-validator';
@@ -291,6 +292,37 @@ export class LivekitController {
       updatedAt: admin.database.ServerValue.TIMESTAMP,
     });
 
+    return { ok: true };
+  }
+
+  /**
+   * PATCH /livekit/participant/rename
+   * Cambia el nombre y/o subtítulo de un participante en la sala LiveKit en tiempo real.
+   * El subtítulo se guarda en el metadata del participante (JSON).
+   * El cambio se propaga a todos los clientes conectados.
+   */
+  @Patch('participant/rename')
+  @UseGuards(FirebaseAuthGuard)
+  async renameParticipant(
+    @Body()
+    body: {
+      eventSlug: string;
+      identity: string;
+      name?: string;
+      subtitle?: string;
+    },
+  ) {
+    const { eventSlug, identity, name, subtitle } = body;
+    if (!eventSlug || !identity) {
+      throw new BadRequestException('eventSlug e identity son requeridos');
+    }
+    if (!name?.trim() && subtitle === undefined) {
+      throw new BadRequestException('Debes enviar al menos name o subtitle');
+    }
+    await this.livekitService.updateParticipantInfo(eventSlug, identity, {
+      name: name?.trim(),
+      subtitle,
+    });
     return { ok: true };
   }
 
