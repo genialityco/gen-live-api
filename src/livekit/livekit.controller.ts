@@ -556,8 +556,8 @@ export class LivekitController {
       mediaType,
       // defaults útiles
       mediaMode: 'full',
-      mediaMuted: true,
-      mediaLoop: false,
+      mediaMuted: false,
+      mediaLoop: true,
       mediaFit: 'cover',
       mediaOpacity: 1,
     });

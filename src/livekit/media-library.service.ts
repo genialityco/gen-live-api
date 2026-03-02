@@ -152,8 +152,8 @@ export class MediaLibraryService {
       mimeType: file.mimetype,
       uploadedBy: uploadedBy || '',
       defaultMode: dto.defaultMode || 'full',
-      defaultLoop: dto.defaultLoop ?? false,
-      defaultMuted: dto.defaultMuted ?? true,
+      defaultLoop: dto.defaultLoop ?? true,
+      defaultMuted: dto.defaultMuted ?? false,
       defaultFit: dto.defaultFit || 'cover',
       defaultOpacity: dto.defaultOpacity ?? 1,
     });
@@ -314,11 +314,14 @@ export class MediaLibraryService {
       return { enabled: false };
     }
 
-    // Incluir frame info
+    // Incluir frame info y fondo
     const result: any = {
       enabled: config.mediaEnabled ?? false,
       showFrame: config.showFrame ?? false,
       frameUrl: config.frameUrl || '',
+      backgroundUrl: config.backgroundUrl || '',
+      backgroundType: config.backgroundType || 'image',
+      backgroundColor: config.backgroundColor || '#000000',
     };
 
     // Procesar capa visual (video/imagen/gif)
@@ -449,8 +452,8 @@ export class MediaLibraryService {
       mimeType: dto.mimeType,
       uploadedBy: uploadedBy || '',
       defaultMode: dto.defaultMode || 'full',
-      defaultLoop: dto.defaultLoop ?? false,
-      defaultMuted: dto.defaultMuted ?? true,
+      defaultLoop: dto.defaultLoop ?? true,
+      defaultMuted: dto.defaultMuted ?? false,
       defaultFit: dto.defaultFit || 'cover',
       defaultOpacity: dto.defaultOpacity ?? 1,
     });
