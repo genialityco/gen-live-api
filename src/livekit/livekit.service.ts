@@ -66,8 +66,9 @@ export class LivekitService {
     role: 'host' | 'speaker' | 'viewer';
     identity?: string; // id de usuario en tu sistema
     name?: string; // displayName
+    subtitle?: string; // cargo o subtítulo visible en NameTag
   }): Promise<string> {
-    const { eventSlug, role, identity, name } = params;
+    const { eventSlug, role, identity, name, subtitle } = params;
     const roomName = this.buildRoomName(eventSlug);
 
     const userIdentity =
@@ -77,6 +78,10 @@ export class LivekitService {
       identity: userIdentity,
       name, // LiveKit puede mostrarlo
     });
+
+    if (subtitle?.trim()) {
+      at.metadata = JSON.stringify({ subtitle: subtitle.trim() });
+    }
 
     at.addGrant({
       room: roomName,

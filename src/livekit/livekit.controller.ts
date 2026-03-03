@@ -45,6 +45,10 @@ export class TokenQueryDto {
   @IsOptional()
   @IsString()
   name?: string;
+
+  @IsOptional()
+  @IsString()
+  subtitle?: string;
 }
 @Controller('livekit')
 export class LivekitController {
@@ -72,7 +76,7 @@ export class LivekitController {
 
   @Get('token')
   async getToken(@Query() query: TokenQueryDto) {
-    const { eventSlug, role, identity, name } = query;
+    const { eventSlug, role, identity, name, subtitle } = query;
     if (!eventSlug || !role) {
       throw new BadRequestException('eventSlug y role son requeridos');
     }
@@ -82,6 +86,7 @@ export class LivekitController {
       role,
       identity,
       name,
+      subtitle,
     });
     console.log(token);
     return { token };
