@@ -234,26 +234,46 @@ export class MediaLibraryController {
       'audio/mp3',
       'audio/wav',
       'audio/ogg',
+      'application/pdf',
     ];
 
+    // Rechazo explícito de PPTX con mensaje claro (requiere LibreOffice en el servidor)
+    if (file.mimetype.includes('presentationml') || file.mimetype.includes('powerpoint')) {
+      throw new BadRequestException(
+        'PPTX no soportado actualmente. Convierte tu presentacion a PDF antes de subir.',
+      );
+    }
+
     if (!allowed.includes(file.mimetype)) {
-      throw new BadRequestException('Only PNG/JPEG/GIF, MP4/WEBM/MPEG or MP3/WAV/OGG allowed');
+      throw new BadRequestException(
+        'Only PNG/JPEG/GIF, MP4/WEBM/MPEG, MP3/WAV/OGG or PDF allowed',
+      );
     }
 
     const isVideo = file.mimetype.startsWith('video/');
     const isAudio = file.mimetype.startsWith('audio/');
+    const isPresentation = file.mimetype === 'application/pdf';
     const maxImage = 10 * 1024 * 1024;
     const maxVideo = 60 * 1024 * 1024;
     const maxAudio = 20 * 1024 * 1024;
-    const max = isVideo ? maxVideo : isAudio ? maxAudio : maxImage;
-    
+    const maxPresentation = 100 * 1024 * 1024;
+    const max = isVideo
+      ? maxVideo
+      : isAudio
+        ? maxAudio
+        : isPresentation
+          ? maxPresentation
+          : maxImage;
+
     if (file.size > max) {
       throw new BadRequestException(
-        isVideo 
-          ? 'Video too large (max 60MB)' 
+        isVideo
+          ? 'Video too large (max 60MB)'
           : isAudio
-          ? 'Audio too large (max 20MB)'
-          : 'Image too large (max 10MB)',
+            ? 'Audio too large (max 20MB)'
+            : isPresentation
+              ? 'Presentation too large (max 100MB)'
+              : 'Image too large (max 10MB)',
       );
     }
 

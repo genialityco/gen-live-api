@@ -11,8 +11,8 @@ export class MediaItem {
   @Prop({ required: true })
   name: string;
 
-  @Prop({ enum: ['image', 'gif', 'video', 'audio'], required: true })
-  type: 'image' | 'gif' | 'video' | 'audio';
+  @Prop({ enum: ['image', 'gif', 'video', 'audio', 'presentation'], required: true })
+  type: 'image' | 'gif' | 'video' | 'audio' | 'presentation';
 
   @Prop({ required: true })
   url: string;
@@ -37,6 +37,16 @@ export class MediaItem {
 
   @Prop()
   uploadedBy?: string;
+
+  // Presentation-specific fields
+  @Prop()
+  totalPages?: number;
+
+  @Prop({ type: [String], default: undefined })
+  slides?: string[];
+
+  @Prop()
+  presentationMimeType?: string;
 
   // Default configuration for this media item
   @Prop({ enum: ['overlay', 'full'], default: 'full' })
