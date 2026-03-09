@@ -28,10 +28,10 @@ export class LiveStreamConfig {
 
   // opciones egress
   @Prop({
-    enum: ['grid', 'speaker', 'presentation', 'pip', 'side_by_side'],
+    enum: ['grid', 'speaker', 'presentation', 'pip', 'side_by_side', 'solo'],
     default: 'speaker',
   })
-  layout: 'grid' | 'speaker' | 'presentation' | 'pip' | 'side_by_side';
+  layout: 'grid' | 'speaker' | 'presentation' | 'pip' | 'side_by_side' | 'solo';
 
   @Prop({ default: 20 })
   maxParticipants: number;
