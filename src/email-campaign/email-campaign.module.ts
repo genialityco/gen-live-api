@@ -24,6 +24,7 @@ import {
   EventEmailTemplate,
   EventEmailTemplateSchema,
 } from '../event-email/schemas/event-email-template.schema';
+import { Event, EventSchema } from '../events/schemas/event.schema';
 import { EventEmailModule } from '../event-email/event-email.module';
 import { EmailCampaignService } from './email-campaign.service';
 import { EmailCampaignController } from './email-campaign.controller';
@@ -37,6 +38,7 @@ import { EmailCampaignController } from './email-campaign.controller';
       { name: OrgAttendee.name, schema: OrgAttendeeSchema },
       { name: Organization.name, schema: OrganizationSchema },
       { name: EventEmailTemplate.name, schema: EventEmailTemplateSchema },
+      { name: Event.name, schema: EventSchema },
     ]),
     EventEmailModule,
   ],

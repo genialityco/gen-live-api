@@ -4,6 +4,7 @@ import {
   NotFoundException,
   ConflictException,
   BadRequestException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { HydratedDocument, Model, Types } from 'mongoose';
@@ -18,6 +19,8 @@ import {
   EmailDelivery,
   EmailDeliveryDocument,
 } from './schemas/email-delivery.schema';
+import { ConfigService } from '@nestjs/config';
+import { Event, EventDocument } from '../events/schemas/event.schema';
 import { EventUser } from '../events/schemas/event-user.schema';
 import { OrgAttendee } from '../organizations/schemas/org-attendee.schema';
 import {
@@ -40,7 +43,7 @@ const BATCH_SIZE = 10;
 const BATCH_DELAY_MS = 750; // ~13 emails/seg, bajo el límite de SES 14/seg
 
 @Injectable()
-export class EmailCampaignService {
+export class EmailCampaignService implements OnModuleInit {
   private readonly logger = new Logger(EmailCampaignService.name);
   private readonly sendingCampaigns = new Set<string>();
   private wrapperTemplate: HandlebarsTemplateDelegate | null = null;
@@ -60,7 +63,29 @@ export class EmailCampaignService {
     private readonly templateModel: Model<EventEmailTemplateDocument>,
     private readonly variableService: EmailVariableService,
     private readonly mailService: MailService,
+    private readonly configService: ConfigService,
+    @InjectModel(Event.name)
+    private readonly eventModel: Model<EventDocument>,
   ) {}
+
+  // ─── Startup recovery ──────────────────────────────────────────────────────
+
+  async onModuleInit(): Promise<void> {
+    const stuck = await this.campaignModel
+      .find({ status: 'sending' })
+      .lean<EmailCampaignDocument[]>();
+
+    if (stuck.length === 0) return;
+
+    this.logger.warn(
+      `Recuperando ${stuck.length} campaña(s) que quedaron en estado 'sending'`,
+    );
+
+    for (const campaign of stuck) {
+      const campaignId = (campaign._id as Types.ObjectId).toString();
+      setImmediate(() => void this.processSend(campaignId));
+    }
+  }
 
   // ─── Template wrapper ──────────────────────────────────────────────────────
 
@@ -279,6 +304,59 @@ export class EmailCampaignService {
     return { pending: pendingCount };
   }
 
+  // ─── iCal ──────────────────────────────────────────────────────────────────
+
+  private buildIcal(
+    event: EventDocument,
+    campaignId: string,
+    frontendUrl: string,
+    orgSlug: string,
+  ): string | null {
+    if (!event.schedule?.startsAt) return null;
+
+    const formatDate = (d: Date): string =>
+      d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+
+    const startsAt = new Date(event.schedule.startsAt);
+    const endsAt = event.schedule.endsAt
+      ? new Date(event.schedule.endsAt)
+      : new Date(startsAt.getTime() + 60 * 60 * 1000);
+
+    const dtstamp = formatDate(new Date());
+    const uid = `${campaignId}-${(event._id as Types.ObjectId).toString()}@geniality.io`;
+    const eventUrl = `${frontendUrl}/org/${orgSlug}/event/${event.slug}`;
+
+    const lines = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//Gen.iality//Live Events//ES',
+      'CALSCALE:GREGORIAN',
+      'METHOD:PUBLISH',
+      'BEGIN:VEVENT',
+      `UID:${uid}`,
+      `DTSTAMP:${dtstamp}`,
+      `DTSTART:${formatDate(startsAt)}`,
+      `DTEND:${formatDate(endsAt)}`,
+      `SUMMARY:${this.escapeIcal(event.title)}`,
+      `URL:${eventUrl}`,
+    ];
+
+    if (event.description) {
+      lines.push(`DESCRIPTION:${this.escapeIcal(event.description)}`);
+    }
+
+    lines.push('END:VEVENT', 'END:VCALENDAR');
+    return lines.join('\r\n');
+  }
+
+  private escapeIcal(text: string): string {
+    return text
+      .replace(/\\/g, '\\\\')
+      .replace(/;/g, '\\;')
+      .replace(/,/g, '\\,')
+      .replace(/\n/g, '\\n');
+  }
+
   // ─── Loop de envío interno ─────────────────────────────────────────────────
 
   private async processSend(campaignId: string): Promise<void> {
@@ -300,6 +378,13 @@ export class EmailCampaignService {
       const wrapper = this.getWrapperTemplate();
       const orgId = campaign.orgId.toString();
       const eventId = campaign.eventId.toString();
+
+      // Generar iCal una sola vez para toda la campaña
+      const frontendUrl = this.configService.get<string>('FRONTEND_URL') ?? '';
+      const event = await this.eventModel.findById(campaign.eventId).lean<EventDocument>();
+      const icalContent = event
+        ? this.buildIcal(event, campaignId, frontendUrl, org?.domainSlug ?? '')
+        : null;
 
       // Procesar en batches todos los deliveries pendientes
       let hasMore = true;
@@ -333,6 +418,7 @@ export class EmailCampaignService {
               eventId,
               org?.name,
               wrapper,
+              icalContent,
             ),
           ),
         );
@@ -372,6 +458,7 @@ export class EmailCampaignService {
     eventId: string,
     fromName: string | undefined,
     wrapper: HandlebarsTemplateDelegate,
+    icalContent: string | null = null,
   ): Promise<void> {
     const deliveryId = (delivery._id as Types.ObjectId).toString();
     const campaignId = delivery.campaignId.toString();
@@ -388,12 +475,20 @@ export class EmailCampaignService {
       const renderedBody = Handlebars.compile(snapshot.body)(context);
       const wrappedHtml = wrapper({ ...context, content: renderedBody });
 
-      const { messageId } = await this.mailService.sendRawHtmlEmail({
-        to: delivery.email,
-        subject: renderedSubject,
-        htmlBody: wrappedHtml,
-        fromName,
-      });
+      const { messageId } = icalContent
+        ? await this.mailService.sendRawEmailWithIcal({
+            to: delivery.email,
+            subject: renderedSubject,
+            htmlBody: wrappedHtml,
+            fromName,
+            icalContent,
+          })
+        : await this.mailService.sendRawHtmlEmail({
+            to: delivery.email,
+            subject: renderedSubject,
+            htmlBody: wrappedHtml,
+            fromName,
+          });
 
       await this.deliveryModel.findByIdAndUpdate(deliveryId, {
         status: 'sent',

@@ -1,7 +1,7 @@
 // src/mail/mail.service.ts
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
+import { SESClient, SendEmailCommand, SendRawEmailCommand } from '@aws-sdk/client-ses';
 import * as Handlebars from 'handlebars';
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -136,6 +136,72 @@ export class MailService {
 
     const res = await this.sesClient.send(command);
     this.logger.log(`Email enviado via SES. MessageId=${res.MessageId}`);
+    return { messageId: res.MessageId ?? '' };
+  }
+
+  /**
+   * Sends an HTML email with an attached .ics calendar invite.
+   * Uses SendRawEmailCommand (MIME multipart) to support attachments.
+   */
+  async sendRawEmailWithIcal(options: {
+    to: string;
+    subject: string;
+    htmlBody: string;
+    fromName?: string;
+    icalContent: string;
+    icalFilename?: string;
+  }): Promise<{ messageId: string }> {
+    const { to, subject, htmlBody, fromName, icalContent, icalFilename = 'invitacion.ics' } = options;
+
+    const source = fromName
+      ? `${fromName} <${this.fromEmail}>`
+      : this.fromEmail;
+
+    // RFC2047 encode subject to handle UTF-8 / special chars
+    const encodedSubject = `=?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`;
+
+    const boundary = `----=_Part_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+    const wrapBase64 = (b64: string): string => {
+      const lines: string[] = [];
+      for (let i = 0; i < b64.length; i += 76) {
+        lines.push(b64.slice(i, i + 76));
+      }
+      return lines.join('\r\n');
+    };
+
+    const htmlB64 = wrapBase64(Buffer.from(htmlBody).toString('base64'));
+    const icalB64 = wrapBase64(Buffer.from(icalContent).toString('base64'));
+
+    const raw = [
+      `From: ${source}`,
+      `To: ${to}`,
+      `Subject: ${encodedSubject}`,
+      'MIME-Version: 1.0',
+      `Content-Type: multipart/mixed; boundary="${boundary}"`,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      htmlB64,
+      '',
+      `--${boundary}`,
+      `Content-Type: text/calendar; charset=UTF-8; method=PUBLISH; name="${icalFilename}"`,
+      'Content-Transfer-Encoding: base64',
+      `Content-Disposition: attachment; filename="${icalFilename}"`,
+      '',
+      icalB64,
+      '',
+      `--${boundary}--`,
+    ].join('\r\n');
+
+    const command = new SendRawEmailCommand({
+      RawMessage: { Data: Buffer.from(raw) },
+    });
+
+    const res = await this.sesClient.send(command);
+    this.logger.log(`Email+iCal enviado via SES. MessageId=${res.MessageId ?? ''}`);
     return { messageId: res.MessageId ?? '' };
   }
 

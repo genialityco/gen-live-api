@@ -1,4 +1,8 @@
+/* eslint-disable @typescript-eslint/no-unnecessary-type-assertion */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import * as Handlebars from 'handlebars';
@@ -7,10 +11,6 @@ import { join } from 'path';
 import { MailService } from '../mail/mail.service';
 import { EventEmailTemplateService } from './event-email-template.service';
 import { EmailVariableService } from './email-variable.service';
-import {
-  EventEmailTemplate,
-  EventEmailTemplateDocument,
-} from './schemas/event-email-template.schema';
 import { Event, EventDocument } from '../events/schemas/event.schema';
 import {
   Organization,
@@ -30,6 +30,7 @@ export class EmailSendService {
     private readonly eventModel: Model<EventDocument>,
     @InjectModel(Organization.name)
     private readonly orgModel: Model<OrganizationDocument>,
+    private readonly configService: ConfigService,
   ) {}
 
   private getWrapperTemplate(): HandlebarsTemplateDelegate {
@@ -103,9 +104,7 @@ export class EmailSendService {
       fromName: org?.name,
     });
 
-    this.logger.log(
-      `Welcome email sent to ${email} for event ${eventId}`,
-    );
+    this.logger.log(`Welcome email sent to ${email} for event ${eventId}`);
   }
 
   /**
@@ -142,6 +141,58 @@ export class EmailSendService {
     });
 
     return { renderedSubject, renderedBody: wrappedHtml };
+  }
+
+  private buildIcal(
+    event: EventDocument,
+    orgSlug: string,
+    frontendUrl: string,
+  ): string | null {
+    if (!event.schedule?.startsAt) return null;
+
+    const formatDate = (d: Date): string =>
+      d
+        .toISOString()
+        .replace(/[-:]/g, '')
+        .replace(/\.\d{3}Z$/, 'Z');
+
+    const startsAt = new Date(event.schedule.startsAt);
+    const endsAt = event.schedule.endsAt
+      ? new Date(event.schedule.endsAt)
+      : new Date(startsAt.getTime() + 60 * 60 * 1000);
+
+    const uid = `test-${(event._id as Types.ObjectId).toString()}@geniality.io`;
+    const eventUrl = `${frontendUrl}/org/${orgSlug}/event/${event.slug}`;
+
+    const lines = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//Gen.iality//Live Events//ES',
+      'CALSCALE:GREGORIAN',
+      'METHOD:PUBLISH',
+      'BEGIN:VEVENT',
+      `UID:${uid}`,
+      `DTSTAMP:${formatDate(new Date())}`,
+      `DTSTART:${formatDate(startsAt)}`,
+      `DTEND:${formatDate(endsAt)}`,
+      `SUMMARY:${this.escapeIcal(event.title)}`,
+      `URL:${eventUrl}`,
+    ];
+
+    if (event.description) {
+      lines.push(`DESCRIPTION:${this.escapeIcal(event.description)}`);
+    }
+
+    lines.push('END:VEVENT', 'END:VCALENDAR');
+    return lines.join('\r\n');
+  }
+
+  private escapeIcal(text: string): string {
+    return text
+      .replace(/\\/g, '\\\\')
+      .replace(/;/g, '\\;')
+      .replace(/,/g, '\\,')
+      .replace(/\n/g, '\\n');
   }
 
   /**
@@ -201,12 +252,37 @@ export class EmailSendService {
       .findById(new Types.ObjectId(orgId))
       .lean<Organization>();
 
-    await this.mailService.sendRawHtmlEmail({
-      to,
-      subject: `[TEST] ${renderedSubject}`,
-      htmlBody: wrappedHtml,
-      fromName: org?.name,
-    });
+    // Adjuntar iCal si el evento tiene schedule
+    let icalContent: string | null = null;
+    if (eventId) {
+      const event = await this.eventModel
+        .findById(new Types.ObjectId(eventId))
+        .lean<EventDocument>();
+      if (event) {
+        const frontendUrl =
+          this.configService.get<string>('FRONTEND_URL') ?? '';
+        icalContent = this.buildIcal(event, org?.domainSlug ?? '', frontendUrl);
+      }
+    }
+
+    const testSubject = `[TEST] ${renderedSubject}`;
+
+    if (icalContent) {
+      await this.mailService.sendRawEmailWithIcal({
+        to,
+        subject: testSubject,
+        htmlBody: wrappedHtml,
+        fromName: org?.name,
+        icalContent,
+      });
+    } else {
+      await this.mailService.sendRawHtmlEmail({
+        to,
+        subject: testSubject,
+        htmlBody: wrappedHtml,
+        fromName: org?.name,
+      });
+    }
 
     this.logger.log(`Test email sent to ${to}`);
   }
