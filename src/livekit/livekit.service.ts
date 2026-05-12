@@ -104,6 +104,21 @@ export class LivekitService {
     await this.roomClient.removeParticipant(roomName, identity);
   }
 
+  async muteParticipantTrack(
+    eventSlug: string,
+    identity: string,
+    trackSid: string,
+    muted: boolean,
+  ) {
+    const roomName = this.buildRoomName(eventSlug);
+    try {
+      await this.roomClient.mutePublishedTrack(roomName, identity, trackSid, muted);
+    } catch (err) {
+      console.error('Error muteando track del participante:', err);
+      throw new InternalServerErrorException('No se pudo mutear el track');
+    }
+  }
+
   /**
    * Actualiza el nombre y/o subtítulo de un participante en tiempo real.
    * El subtítulo se persiste en el metadata del participante como JSON.

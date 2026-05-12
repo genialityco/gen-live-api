@@ -331,6 +331,25 @@ export class LivekitController {
     return { ok: true };
   }
 
+  @Patch('participant/mute')
+  @UseGuards(FirebaseAuthGuard)
+  async muteParticipantTrack(
+    @Body()
+    body: {
+      eventSlug: string;
+      identity: string;
+      trackSid: string;
+      muted: boolean;
+    },
+  ) {
+    const { eventSlug, identity, trackSid, muted } = body;
+    if (!eventSlug || !identity || !trackSid) {
+      throw new BadRequestException('eventSlug, identity y trackSid son requeridos');
+    }
+    await this.livekitService.muteParticipantTrack(eventSlug, identity, trackSid, muted);
+    return { ok: true };
+  }
+
   @Post('kick')
   async kick(@Body() body: { eventSlug: string; uid: string }) {
     const { eventSlug, uid } = body;
