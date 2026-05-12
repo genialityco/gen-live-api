@@ -59,9 +59,6 @@ importers:
       livekit-server-sdk:
         specifier: ^2.15.0
         version: 2.15.0
-      mongodb:
-        specifier: ^7.0.0
-        version: 7.0.0
       mongoose:
         specifier: ^8.19.1
         version: 8.19.1
@@ -129,6 +126,9 @@ importers:
       jest:
         specifier: ^30.0.0
         version: 30.2.0(@types/node@22.18.10)(ts-node@10.9.2(@types/node@22.18.10)(typescript@5.9.3))
+      mongodb:
+        specifier: ^7.0.0
+        version: 7.0.0
       prettier:
         specifier: ^3.4.2
         version: 3.6.2
