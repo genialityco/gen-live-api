@@ -155,7 +155,16 @@ export class OrgAttendeeService {
         return;
       }
 
-      const value = typeof rawValue === 'string' ? rawValue.trim() : rawValue;
+      const normalized =
+        typeof rawValue === 'string' ? rawValue.trim() : rawValue;
+
+      // Busca con ambos tipos (string y número) para tolerar discrepancias
+      // entre cómo Excel exporta el valor y cómo fue guardado originalmente.
+      const candidates = new Set<any>([normalized, String(normalized)]);
+      const asNumber = Number(normalized);
+      if (!isNaN(asNumber) && isFinite(asNumber)) candidates.add(asNumber);
+      const value =
+        candidates.size > 1 ? { $in: Array.from(candidates) } : normalized;
 
       if (fieldName === 'email') {
         query.email = value;
@@ -296,79 +305,97 @@ export class OrgAttendeeService {
       phone?: string;
     }[],
   ) {
-    let created = 0;
-    let updated = 0;
     const errors: { rowIndex: number; error: string }[] = [];
+    const ops: any[] = [];
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
-
       try {
-        let attendee: any | null = null;
-
-        // 1) Intentar por identificadores del registrationForm
-        if (
+        const filter: any = { organizationId };
+        const hasIdentifiers =
           row.identifierValues &&
-          Object.keys(row.identifierValues).length > 0
-        ) {
-          attendee = await this.findByIdentifiers(
-            organizationId,
+          Object.keys(row.identifierValues).length > 0;
+
+        if (hasIdentifiers) {
+          for (const [fieldName, rawValue] of Object.entries(
             row.identifierValues,
-          );
+          )) {
+            if (
+              rawValue == null ||
+              (typeof rawValue === 'string' && rawValue.trim() === '')
+            )
+              continue;
+            const normalized =
+              typeof rawValue === 'string' ? rawValue.trim() : rawValue;
+            const candidates = new Set<any>([normalized, String(normalized)]);
+            const n = Number(normalized);
+            if (!isNaN(n) && isFinite(n)) candidates.add(n);
+            filter[`registrationData.${fieldName}`] =
+              candidates.size > 1
+                ? { $in: Array.from(candidates) }
+                : normalized;
+          }
+        } else if (row.email) {
+          filter.email = row.email;
         }
 
-        // 2) Fallback: buscar por email si no se encontró y hay email
-        if (!attendee && row.email) {
-          attendee = await this.findByEmailAndOrg(row.email, organizationId);
-        }
+        // Pipeline update: merge registrationData en lugar de sobrescribir,
+        // e inicializa organizationId y registeredAt solo en documentos nuevos.
+        const setFields: any = {
+          registrationData: {
+            $mergeObjects: [
+              { $ifNull: ['$registrationData', {}] },
+              row.registrationData || {},
+            ],
+          },
+          organizationId: { $ifNull: ['$organizationId', organizationId] },
+          registeredAt: { $ifNull: ['$registeredAt', '$$NOW'] },
+        };
 
-        if (attendee) {
-          // UPDATE: merge de registrationData
-          const newRegistrationData = {
-            ...(attendee.registrationData || {}),
-            ...(row.registrationData || {}),
-          };
+        if (row.name) setFields.name = row.name;
+        if (row.email) setFields.email = row.email;
+        if (row.phone) setFields.phone = row.phone;
 
-          const updatePayload: any = {
-            registrationData: newRegistrationData,
-          };
-
-          if (row.name) updatePayload.name = row.name;
-          if (row.email) updatePayload.email = row.email;
-          if (row.phone) updatePayload.phone = row.phone;
-
-          await this.orgAttendeeModel
-            .findByIdAndUpdate(attendee._id, updatePayload, { new: true })
-            .lean();
-
-          updated++;
-        } else {
-          // CREATE
-          const newAttendee = new this.orgAttendeeModel({
-            organizationId,
-            name: row.name || row.registrationData?.name || '',
-            email: row.email || row.registrationData?.email || '',
-            phone: row.phone,
-            registrationData: row.registrationData || {},
-            registeredAt: new Date(),
-          });
-
-          await newAttendee.save();
-          created++;
-        }
-      } catch (e: any) {
-        errors.push({
-          rowIndex: i,
-          error: e?.message || 'Unknown error',
+        ops.push({
+          updateOne: {
+            filter,
+            update: [{ $set: setFields }],
+            upsert: true,
+          },
         });
+      } catch (e: any) {
+        errors.push({ rowIndex: i, error: e?.message || 'Unknown error' });
       }
     }
 
-    return {
-      created,
-      updated,
-      errors,
-    };
+    if (ops.length === 0) return { created: 0, updated: 0, errors };
+
+    try {
+      const result = await this.orgAttendeeModel.bulkWrite(ops, {
+        ordered: false,
+      });
+      console.log(
+        `✅ bulkImport: ${result.upsertedCount} creados, ${result.modifiedCount} actualizados`,
+      );
+      return {
+        created: result.upsertedCount,
+        updated: result.modifiedCount,
+        errors,
+      };
+    } catch (e: any) {
+      // BulkWriteError: contiene resultados parciales cuando ordered:false
+      if (e.writeErrors) {
+        for (const we of e.writeErrors as any[]) {
+          errors.push({ rowIndex: we.index, error: we.errmsg || 'Write error' });
+        }
+      }
+      const r = e.result;
+      return {
+        created: r?.nUpserted ?? 0,
+        updated: r?.nModified ?? 0,
+        errors,
+      };
+    }
   }
 
   /**
