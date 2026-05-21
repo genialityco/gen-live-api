@@ -44,5 +44,6 @@ import { EmailCampaignController } from './email-campaign.controller';
   ],
   controllers: [EmailCampaignController],
   providers: [EmailCampaignService],
+  exports: [EmailCampaignService],
 })
 export class EmailCampaignModule {}

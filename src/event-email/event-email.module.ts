@@ -38,6 +38,6 @@ import { EventEmailController } from './event-email.controller';
     EmailSendService,
   ],
   controllers: [EventEmailController],
-  exports: [EmailSendService, EmailVariableService],
+  exports: [EmailSendService, EmailVariableService, EventEmailTemplateService],
 })
 export class EventEmailModule {}

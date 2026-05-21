@@ -584,4 +584,16 @@ export class EmailCampaignService implements OnModuleInit {
 
     return Array.from(recipientMap.values());
   }
+
+  async deleteByEventId(eventId: string): Promise<void> {
+    const oid = new Types.ObjectId(eventId);
+    const campaigns = await this.campaignModel
+      .find({ eventId: oid }, { _id: 1 })
+      .lean();
+    const campaignIds = campaigns.map((c) => c._id);
+    if (campaignIds.length > 0) {
+      await this.deliveryModel.deleteMany({ campaignId: { $in: campaignIds } });
+    }
+    await this.campaignModel.deleteMany({ eventId: oid });
+  }
 }

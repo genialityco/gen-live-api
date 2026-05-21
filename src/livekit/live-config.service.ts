@@ -174,4 +174,9 @@ export class LiveConfigService {
     });
     return cfg;
   }
+
+  async deleteByEventSlug(eventSlug: string): Promise<void> {
+    this.configCache.delete(eventSlug);
+    await this.model.deleteOne({ eventSlug });
+  }
 }

@@ -15,6 +15,9 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Event, EventDocument } from './schemas/event.schema';
 import { EventUser } from './schemas/event-user.schema';
+import { ViewingSession } from './schemas/viewing-session.schema';
+import { EventMetrics } from './schemas/event-metrics.schema';
+import { Poll } from './schemas/poll.schema';
 import {
   FormFieldType,
   Organization,
@@ -30,6 +33,8 @@ import { ViewingMetricsService } from './viewing-metrics.service.v2';
 import { LivekitEgressService } from '../livekit/livekit-egress.service';
 import { LiveConfigService } from '../livekit/live-config.service';
 import { EmailSendService } from '../event-email/email-send.service';
+import { EventEmailTemplateService } from '../event-email/event-email-template.service';
+import { EmailCampaignService } from '../email-campaign/email-campaign.service';
 
 function normalizeByType(value: any, type: FormFieldType | undefined) {
   if (value === null || value === undefined) return value;
@@ -64,6 +69,102 @@ function normalizeByType(value: any, type: FormFieldType | undefined) {
   }
 }
 
+const DEFAULT_EMAIL_TEMPLATES = [
+  {
+    type: 'WELCOME' as const,
+    name: 'Email de bienvenida',
+    subject: '¡Bienvenido/a a {{event.title}}!',
+    body: `<h2>¡Hola!</h2>
+
+<p>Tu registro al evento <strong>{{event.title}}</strong> ha sido confirmado.</p>
+
+<table cellpadding="0" cellspacing="0" style="width: 100%; margin: 16px 0; border-collapse: collapse;">
+  <tr>
+    <td style="padding: 12px 16px; background-color: #f8f9fa; border-radius: 8px;">
+      <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse;">
+        <tr>
+          <td style="padding: 4px 0; color: #868e96; font-size: 13px; width: 110px;">Fecha de inicio</td>
+          <td style="padding: 4px 0; font-size: 13px;">{{event.schedule.startsAt.date}}, {{event.schedule.startsAt.time}}</td>
+        </tr>
+        <tr>
+          <td style="padding: 4px 0; color: #868e96; font-size: 13px;">Fecha de fin</td>
+          <td style="padding: 4px 0; font-size: 13px;">{{event.schedule.endsAt.date}}, {{event.schedule.endsAt.time}}</td>
+        </tr>
+        <tr>
+          <td colspan="2" style="padding: 4px 0; color: #adb5bd; font-size: 11px;">{{event.schedule.startsAt.timezone}}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+
+<p>Puedes acceder al evento desde el siguiente enlace:</p>
+<p><a href="{{event.joinUrl}}" style="display: inline-block; padding: 10px 24px; background-color: #4263eb; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: 600;">Ir al evento</a></p>
+
+<p>¡Te esperamos!</p>`,
+  },
+  {
+    type: 'INVITATION' as const,
+    name: 'Email de invitación',
+    subject: 'Te invitamos a {{event.title}}',
+    body: `<h2>¡Hola!</h2>
+
+<p>Te invitamos a participar en nuestro próximo evento: <strong>{{event.title}}</strong>.</p>
+
+<table cellpadding="0" cellspacing="0" style="width: 100%; margin: 16px 0; border-collapse: collapse;">
+  <tr>
+    <td style="padding: 12px 16px; background-color: #f8f9fa; border-radius: 8px;">
+      <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse;">
+        <tr>
+          <td style="padding: 4px 0; color: #868e96; font-size: 13px; width: 110px;">Fecha</td>
+          <td style="padding: 4px 0; font-size: 13px;">{{event.schedule.startsAt.date}}</td>
+        </tr>
+        <tr>
+          <td style="padding: 4px 0; color: #868e96; font-size: 13px;">Hora</td>
+          <td style="padding: 4px 0; font-size: 13px;">{{event.schedule.startsAt.time}} ({{event.schedule.startsAt.timezone}})</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+
+<p>Regístrate y accede al evento desde el siguiente enlace:</p>
+<p><a href="{{event.joinUrl}}" style="display: inline-block; padding: 10px 24px; background-color: #4263eb; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: 600;">Ver evento</a></p>
+
+<p>¡Esperamos contar con tu presencia!</p>`,
+  },
+  {
+    type: 'REMINDER' as const,
+    name: 'Email de recordatorio',
+    subject: 'Recordatorio: {{event.title}} empieza pronto',
+    body: `<h2>¡Hola!</h2>
+
+<p>Te recordamos que el evento <strong>{{event.title}}</strong> al que estás registrado/a comienza pronto.</p>
+
+<table cellpadding="0" cellspacing="0" style="width: 100%; margin: 16px 0; border-collapse: collapse;">
+  <tr>
+    <td style="padding: 12px 16px; background-color: #f8f9fa; border-radius: 8px;">
+      <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse;">
+        <tr>
+          <td style="padding: 4px 0; color: #868e96; font-size: 13px; width: 110px;">Fecha</td>
+          <td style="padding: 4px 0; font-size: 13px;">{{event.schedule.startsAt.date}}</td>
+        </tr>
+        <tr>
+          <td style="padding: 4px 0; color: #868e96; font-size: 13px;">Hora</td>
+          <td style="padding: 4px 0; font-size: 13px;">{{event.schedule.startsAt.time}} ({{event.schedule.startsAt.timezone}})</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+
+<p>Accede al evento en el momento indicado desde este enlace:</p>
+<p><a href="{{event.joinUrl}}" style="display: inline-block; padding: 10px 24px; background-color: #4263eb; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: 600;">Ir al evento</a></p>
+
+<p>¡Hasta pronto!</p>`,
+  },
+];
+
 @Injectable()
 export class EventsService implements OnModuleInit {
   private logger = console;
@@ -73,12 +174,17 @@ export class EventsService implements OnModuleInit {
     @Inject(Organization.name) private orgModel: Model<OrganizationDocument>,
     @InjectModel(EventUser.name) private eventUserModel: Model<EventUser>,
     @InjectModel(OrgAttendee.name) private orgAttendeeModel: Model<OrgAttendee>,
+    @InjectModel(ViewingSession.name) private viewingSessionModel: Model<ViewingSession>,
+    @InjectModel(EventMetrics.name) private eventMetricsModel: Model<EventMetrics>,
+    @InjectModel(Poll.name) private pollModel: Model<Poll>,
     private rtdb: RtdbService,
     private watcher: RtdbPresenceWatcherService,
     private metricsService: ViewingMetricsService,
     private livekitEgressService: LivekitEgressService,
     private liveConfigService: LiveConfigService,
     private emailSendService: EmailSendService,
+    private emailTemplateService: EventEmailTemplateService,
+    private emailCampaignService: EmailCampaignService,
   ) {
     // Configurar watcher con servicio de métricas para evitar dependencia circular
     this.watcher.setViewingMetricsService(this.metricsService);
@@ -227,7 +333,7 @@ export class EventsService implements OnModuleInit {
   }) {
     // normaliza slug en backend también
     const clean = (s: string) => s.trim().toLowerCase();
-    return this.model.create({
+    const event = await this.model.create({
       orgId: new this.model.db.base.Types.ObjectId(dto.orgId),
       slug: clean(dto.slug),
       title: dto.title.trim(),
@@ -235,6 +341,26 @@ export class EventsService implements OnModuleInit {
       stream: dto.stream,
       status: 'upcoming',
     });
+
+    // Sembrar plantillas de email por defecto (fire-and-forget)
+    const eventId = event._id.toString();
+    Promise.all(
+      DEFAULT_EMAIL_TEMPLATES.map((tpl) =>
+        this.emailTemplateService.upsert({
+          orgId: dto.orgId,
+          eventId,
+          type: tpl.type,
+          name: tpl.name,
+          subject: tpl.subject,
+          body: tpl.body,
+          enabled: true,
+        }),
+      ),
+    ).catch((err) =>
+      this.logger.error('Error seeding default email templates:', err?.message ?? err),
+    );
+
+    return event;
   }
 
   async updateStream(
@@ -966,6 +1092,46 @@ export class EventsService implements OnModuleInit {
         details: results,
       };
     }
+  }
+
+  /**
+   * Elimina un evento y todos sus datos asociados.
+   * No elimina los OrgAttendee, solo desvincula el eventId de sus arrays.
+   */
+  async deleteEvent(eventId: string) {
+    const event = await this.model
+      .findById(eventId, { slug: 1, orgId: 1 })
+      .lean();
+    if (!event) throw new NotFoundException('Event not found');
+
+    const slug = event.slug as string;
+    const oidStr = new Types.ObjectId(eventId);
+
+    await Promise.all([
+      // Datos del evento
+      this.eventUserModel.deleteMany({ eventId }),
+      this.viewingSessionModel.deleteMany({ eventId }),
+      this.eventMetricsModel.deleteMany({ eventId }),
+      this.pollModel.deleteMany({ eventId: oidStr }),
+      // Emails
+      this.emailTemplateService.deleteByEventId(eventId),
+      this.emailCampaignService.deleteByEventId(eventId),
+      // Config de streaming
+      this.liveConfigService.deleteByEventSlug(slug),
+      // Desvincular attendees (sin borrarlos)
+      this.orgAttendeeModel.updateMany(
+        { eventIds: oidStr },
+        { $pull: { eventIds: oidStr } },
+      ),
+      // RTDB
+      this.rtdb.ref(`/events/${eventId}`).remove(),
+      this.rtdb.ref(`/presence/${eventId}`).remove(),
+      this.rtdb.ref(`/announcements/${eventId}`).remove(),
+      this.rtdb.ref(`/metrics/${eventId}`).remove(),
+    ]);
+
+    await this.model.findByIdAndDelete(eventId);
+    return { ok: true };
   }
 
   /**

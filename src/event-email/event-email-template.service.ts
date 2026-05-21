@@ -112,4 +112,11 @@ export class EventEmailTemplateService {
   async delete(templateId: string): Promise<void> {
     await this.model.findByIdAndDelete(templateId);
   }
+
+  /**
+   * Deletes all event-level templates for a given event.
+   */
+  async deleteByEventId(eventId: string): Promise<void> {
+    await this.model.deleteMany({ eventId: new Types.ObjectId(eventId) });
+  }
 }

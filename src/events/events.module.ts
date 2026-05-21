@@ -35,6 +35,7 @@ import {
 } from '../users/schemas/user-account.schema';
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { EventEmailModule } from '../event-email/event-email.module';
+import { EmailCampaignModule } from '../email-campaign/email-campaign.module';
 import { Logger } from '@nestjs/common';
 
 @Module({
@@ -52,6 +53,7 @@ import { Logger } from '@nestjs/common';
     RtdbModule,
     OrganizationsModule,
     EventEmailModule,
+    EmailCampaignModule,
     forwardRef(() => LivekitModule),
   ],
   providers: [

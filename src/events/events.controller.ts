@@ -3,6 +3,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   Param,
@@ -280,6 +281,13 @@ export class EventsController {
     );
 
     return { url };
+  }
+
+  // Elimina el evento y todos sus datos asociados (dueñ@ del evento)
+  @Delete(':eventId')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async deleteEvent(@Param('eventId') eventId: string) {
+    return this.svc.deleteEvent(eventId);
   }
 
   // ENDPOINTS DE MÉTRICAS (requieren ser dueño del evento)
