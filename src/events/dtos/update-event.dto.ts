@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsOptional,
   IsString,
   IsNotEmpty,
@@ -31,4 +32,8 @@ export class UpdateEventDto {
   @Type(() => ScheduleDto)
   @IsOptional()
   schedule?: ScheduleDto;
+
+  @IsBoolean()
+  @IsOptional()
+  hidden?: boolean;
 }

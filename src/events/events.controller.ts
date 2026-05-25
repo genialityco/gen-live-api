@@ -28,6 +28,7 @@ import { UpdateStatusDto } from './dtos/update-status.dto';
 import { UpdateStreamDto } from './dtos/update-stream.dto';
 import { UpdateEventBrandingDto } from './dtos/update-event-branding.dto';
 import { RegisterToEventDto } from './dtos/register-to-event.dto';
+import { TransferEventDto } from './dtos/transfer-event.dto';
 import { FindRegistrationDto } from './dtos/find-registration.dto';
 import { UpdateRegistrationDto } from './dtos/update-registration.dto';
 import { StorageService } from '../organizations/storage.service';
@@ -288,6 +289,22 @@ export class EventsController {
   @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
   async deleteEvent(@Param('eventId') eventId: string) {
     return this.svc.deleteEvent(eventId);
+  }
+
+  // Transfiere el evento a otro org (dueño de ambos orgs)
+  @Patch(':eventId/transfer')
+  @UseGuards(FirebaseAuthGuard)
+  async transferEvent(
+    @Param('eventId') eventId: string,
+    @Body() dto: TransferEventDto,
+    @Req() req: any,
+  ) {
+    return this.svc.transferEvent(
+      eventId,
+      dto.targetOrgId,
+      dto.newSlug,
+      req.user.uid,
+    );
   }
 
   // ENDPOINTS DE MÉTRICAS (requieren ser dueño del evento)

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject, forwardRef } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import {
@@ -7,12 +7,14 @@ import {
 } from './schemas/organization.schema';
 import { OrgAttendee } from './schemas/org-attendee.schema';
 import { CreateOrgAttendeeDto } from './dtos/create-org-attendee.dto';
+import { EventsService } from '../events/events.service';
 
 @Injectable()
 export class OrganizationsService {
   constructor(
     @InjectModel(Organization.name) private model: Model<OrganizationDocument>,
     @InjectModel(OrgAttendee.name) private attendeeModel: Model<OrgAttendee>,
+    @Inject(forwardRef(() => EventsService)) private eventsService: EventsService,
   ) {}
 
   async create(
@@ -155,5 +157,22 @@ export class OrganizationsService {
     return this.model
       .findByIdAndUpdate(orgId, updateData, { new: true, runValidators: true })
       .lean();
+  }
+
+  async deleteOrganization(orgId: string) {
+    const events = await this.eventsService.listByOrgId(orgId);
+
+    // Borra cada evento y todos sus datos en cascada
+    for (const event of events) {
+      await this.eventsService.deleteEvent(event._id.toString());
+    }
+
+    // Borra todos los attendees del org
+    await this.attendeeModel.deleteMany({ organizationId: orgId });
+
+    // Borra el org
+    await this.model.findByIdAndDelete(orgId);
+
+    return { ok: true, deletedEvents: events.length };
   }
 }

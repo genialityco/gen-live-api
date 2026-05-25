@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import {
   Organization,
@@ -10,6 +10,7 @@ import { OrgAttendeeController } from './org-attendee.controller';
 import { OrganizationsService } from './organizations.service';
 import { OrgAttendeeService } from './org-attendee.service';
 import { StorageService } from './storage.service';
+import { EventsModule } from '../events/events.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { StorageService } from './storage.service';
       { name: Organization.name, schema: OrganizationSchema },
       { name: OrgAttendee.name, schema: OrgAttendeeSchema },
     ]),
+    forwardRef(() => EventsModule),
   ],
   providers: [OrganizationsService, OrgAttendeeService, StorageService],
   controllers: [OrganizationsController, OrgAttendeeController],

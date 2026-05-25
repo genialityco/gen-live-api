@@ -51,7 +51,7 @@ import { Logger } from '@nestjs/common';
       { name: UserAccount.name, schema: UserAccountSchema },
     ]),
     RtdbModule,
-    OrganizationsModule,
+    forwardRef(() => OrganizationsModule),
     EventEmailModule,
     EmailCampaignModule,
     forwardRef(() => LivekitModule),

@@ -3,6 +3,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Post,
@@ -294,5 +295,20 @@ export class OrganizationsController {
     if (!org) throw new NotFoundException('Organization not found');
 
     return org.registrationForm || { enabled: false, fields: [] };
+  }
+
+  // =============== ELIMINAR ORGANIZACIÓN ===============
+
+  @Delete('slug/:slug')
+  @UseGuards(FirebaseAuthGuard)
+  async deleteOrganization(
+    @Param('slug') slug: string,
+    @Req() req: any,
+  ) {
+    const org = await this.svc.findBySlug(slug);
+    if (!org) throw new NotFoundException('Organization not found');
+    if (org.ownerUid !== req.user?.uid) throw new ForbiddenException('Not owner');
+
+    return this.svc.deleteOrganization(org._id.toString());
   }
 }

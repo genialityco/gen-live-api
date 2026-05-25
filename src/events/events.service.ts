@@ -9,6 +9,8 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
+  ConflictException,
   OnModuleInit,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -289,7 +291,7 @@ export class EventsService implements OnModuleInit {
     }
 
     const ev = await this.model
-      .findByIdAndUpdate(eventId, updates, { new: true })
+      .findByIdAndUpdate(eventId, { $set: updates }, { new: true })
       .lean();
     if (!ev) throw new NotFoundException('Event not found');
     return ev;
@@ -310,9 +312,8 @@ export class EventsService implements OnModuleInit {
   async listByOrgIdPublic(orgId: string) {
     try {
       const objectId = new Types.ObjectId(orgId);
-      // Retorna solo información pública de los eventos incluyendo branding
       return this.model
-        .find({ orgId: objectId })
+        .find({ orgId: objectId, hidden: { $ne: true } })
         .select(
           'slug title description status schedule stream branding createdAt',
         )
@@ -1152,5 +1153,45 @@ export class EventsService implements OnModuleInit {
         error: err.message,
       };
     }
+  }
+
+  async transferEvent(
+    eventId: string,
+    targetOrgId: string,
+    newSlug: string | undefined,
+    requesterUid: string,
+  ) {
+    const event = await this.model.findById(eventId);
+    if (!event) throw new NotFoundException('Evento no encontrado');
+
+    const sourceOrg = await this.orgModel
+      .findById(event.orgId, { ownerUid: 1 })
+      .lean();
+    if (!sourceOrg || sourceOrg.ownerUid !== requesterUid) {
+      throw new ForbiddenException('No eres dueño del org origen');
+    }
+
+    const targetOrg = await this.orgModel
+      .findById(targetOrgId, { ownerUid: 1 })
+      .lean();
+    if (!targetOrg) throw new NotFoundException('Org destino no encontrado');
+    if (targetOrg.ownerUid !== requesterUid) {
+      throw new ForbiddenException('No eres dueño del org destino');
+    }
+
+    const finalSlug = newSlug || event.slug;
+
+    const conflict = await this.model
+      .findOne({ orgId: new Types.ObjectId(targetOrgId), slug: finalSlug })
+      .lean();
+    if (conflict) {
+      throw new ConflictException(
+        `El slug "${finalSlug}" ya existe en el org destino`,
+      );
+    }
+
+    event.orgId = new Types.ObjectId(targetOrgId);
+    event.slug = finalSlug;
+    return (await event.save()).toObject();
   }
 }

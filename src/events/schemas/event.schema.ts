@@ -85,6 +85,9 @@ export class Event {
   @Prop({ type: Object })
   branding?: EventBrandingConfig;
 
+  @Prop({ default: false })
+  hidden?: boolean;
+
   // Campo virtual para compatibilidad con frontend
   get startDate(): Date | undefined {
     return this.schedule?.startsAt;
