@@ -541,6 +541,9 @@ export class EmailCampaignService implements OnModuleInit {
     const eventId = campaign.eventId.toString();
     const audience = campaign.targetAudience;
 
+    // Emails con bounces permanentes o complaints se excluyen del envío
+    const suppressedFilter = { emailStatus: { $nin: ['bounced', 'complained'] } };
+
     if (audience === 'event_users' || audience === 'both') {
       const statusFilter =
         campaign.audienceFilters?.eventUserStatus &&
@@ -550,7 +553,10 @@ export class EmailCampaignService implements OnModuleInit {
 
       const eventUsers = await this.eventUserModel
         .find({ eventId, ...statusFilter })
-        .populate<{ attendeeId: OrgAttendeeDocument }>('attendeeId')
+        .populate<{ attendeeId: OrgAttendeeDocument }>({
+          path: 'attendeeId',
+          match: suppressedFilter,
+        })
         .lean();
 
       for (const eu of eventUsers) {
@@ -567,7 +573,7 @@ export class EmailCampaignService implements OnModuleInit {
 
     if (audience === 'org_attendees' || audience === 'both') {
       const orgAttendees = await this.orgAttendeeModel
-        .find({ organizationId: orgId })
+        .find({ organizationId: orgId, ...suppressedFilter })
         .lean<OrgAttendeeDocument[]>();
 
       for (const a of orgAttendees) {
@@ -583,6 +589,50 @@ export class EmailCampaignService implements OnModuleInit {
     }
 
     return Array.from(recipientMap.values());
+  }
+
+  async listSuppressedAttendees(
+    orgId: string,
+  ): Promise<
+    {
+      _id: string;
+      email: string;
+      name: string;
+      emailStatus: string;
+      emailBounceType: string | null;
+      emailSuppressedAt: Date | null;
+      emailSuppressReason: string | null;
+    }[]
+  > {
+    const docs = await this.orgAttendeeModel
+      .find({
+        organizationId: orgId,
+        emailStatus: { $in: ['bounced', 'complained'] },
+      })
+      .select(
+        '_id email name emailStatus emailBounceType emailSuppressedAt emailSuppressReason',
+      )
+      .sort({ emailSuppressedAt: -1 })
+      .lean<OrgAttendeeDocument[]>();
+
+    return docs.map((d) => ({
+      _id: (d._id as Types.ObjectId).toString(),
+      email: d.email,
+      name: d.name,
+      emailStatus: d.emailStatus ?? 'valid',
+      emailBounceType: (d as any).emailBounceType ?? null,
+      emailSuppressedAt: (d as any).emailSuppressedAt ?? null,
+      emailSuppressReason: (d as any).emailSuppressReason ?? null,
+    }));
+  }
+
+  async restoreAttendeeEmail(attendeeId: string): Promise<void> {
+    await this.orgAttendeeModel.findByIdAndUpdate(attendeeId, {
+      emailStatus: 'valid',
+      emailBounceType: null,
+      emailSuppressedAt: null,
+      emailSuppressReason: null,
+    });
   }
 
   async deleteByEventId(eventId: string): Promise<void> {

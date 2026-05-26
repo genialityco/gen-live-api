@@ -28,6 +28,8 @@ import { Event, EventSchema } from '../events/schemas/event.schema';
 import { EventEmailModule } from '../event-email/event-email.module';
 import { EmailCampaignService } from './email-campaign.service';
 import { EmailCampaignController } from './email-campaign.controller';
+import { SesWebhookService } from './ses-webhook.service';
+import { SesWebhookController } from './ses-webhook.controller';
 
 @Module({
   imports: [
@@ -42,8 +44,8 @@ import { EmailCampaignController } from './email-campaign.controller';
     ]),
     EventEmailModule,
   ],
-  controllers: [EmailCampaignController],
-  providers: [EmailCampaignService],
+  controllers: [EmailCampaignController, SesWebhookController],
+  providers: [EmailCampaignService, SesWebhookService],
   exports: [EmailCampaignService],
 })
 export class EmailCampaignModule {}

@@ -27,6 +27,7 @@ export class MailService {
   private readonly logger = new Logger(MailService.name);
   private readonly sesClient: SESClient;
   private readonly fromEmail: string;
+  private readonly configurationSetName: string | undefined;
 
   constructor(private readonly configService: ConfigService) {
     const region = this.configService.get<string>('AWS_REGION');
@@ -35,6 +36,9 @@ export class MailService {
       'AWS_SECRET_ACCESS_KEY',
     );
     this.fromEmail = this.configService.get<string>('AWS_SES_EMAIL_FROM')!;
+    this.configurationSetName = this.configService.get<string>(
+      'AWS_SES_CONFIGURATION_SET',
+    );
 
     this.sesClient = new SESClient({
       region,
@@ -98,6 +102,7 @@ export class MailService {
       },
       Source: source,
       ReplyToAddresses: replyToAddresses,
+      ConfigurationSetName: this.configurationSetName,
     });
 
     try {
@@ -132,6 +137,7 @@ export class MailService {
         Subject: { Data: subject, Charset: 'UTF-8' },
       },
       Source: source,
+      ConfigurationSetName: this.configurationSetName,
     });
 
     const res = await this.sesClient.send(command);
@@ -198,6 +204,7 @@ export class MailService {
 
     const command = new SendRawEmailCommand({
       RawMessage: { Data: Buffer.from(raw) },
+      ConfigurationSetName: this.configurationSetName,
     });
 
     const res = await this.sesClient.send(command);

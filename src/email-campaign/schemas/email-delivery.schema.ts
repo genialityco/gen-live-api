@@ -1,7 +1,13 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 
-export type DeliveryStatus = 'pending' | 'sent' | 'rejected' | 'failed';
+export type DeliveryStatus =
+  | 'pending'
+  | 'sent'
+  | 'rejected'
+  | 'failed'
+  | 'bounced'
+  | 'complained';
 
 @Schema({ timestamps: true })
 export class EmailDelivery {
@@ -28,7 +34,7 @@ export class EmailDelivery {
 
   @Prop({
     required: true,
-    enum: ['pending', 'sent', 'rejected', 'failed'],
+    enum: ['pending', 'sent', 'rejected', 'failed', 'bounced', 'complained'],
     default: 'pending',
   })
   status: DeliveryStatus;

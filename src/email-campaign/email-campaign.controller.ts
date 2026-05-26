@@ -8,6 +8,7 @@ import {
   UseGuards,
   Req,
   Res,
+  HttpCode,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { FirebaseAuthGuard } from '../common/guards/firebase-auth.guard';
@@ -75,5 +76,19 @@ export class EmailCampaignController {
       `attachment; filename="campaign-${campaignId}.csv"`,
     );
     res.send('\uFEFF' + csv); // BOM para Excel
+  }
+
+  // \u2500\u2500\u2500 Supresi\u00F3n de emails \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+  @Get('org/:orgId/suppressed')
+  async listSuppressed(@Param('orgId') orgId: string) {
+    return this.campaignService.listSuppressedAttendees(orgId);
+  }
+
+  @Post('attendee/:attendeeId/restore-email')
+  @HttpCode(200)
+  async restoreAttendeeEmail(@Param('attendeeId') attendeeId: string) {
+    await this.campaignService.restoreAttendeeEmail(attendeeId);
+    return { ok: true };
   }
 }
