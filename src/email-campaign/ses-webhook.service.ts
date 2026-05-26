@@ -33,6 +33,7 @@ export class SesWebhookService {
 
   async handleSnsPayload(payload: Record<string, any>): Promise<void> {
     const type: string = payload?.Type;
+    this.logger.log(`SNS payload recibido: Type=${type}, TopicArn=${payload?.TopicArn ?? 'n/a'}`);
 
     // Validar que el mensaje viene del topic correcto (si está configurado)
     if (
@@ -61,6 +62,7 @@ export class SesWebhookService {
     }
 
     const notificationType: string = message.notificationType;
+    this.logger.log(`SNS notificación recibida: ${notificationType}`);
 
     if (notificationType === 'Bounce') {
       await this.handleBounce(message);
