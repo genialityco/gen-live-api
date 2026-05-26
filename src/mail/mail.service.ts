@@ -47,6 +47,12 @@ export class MailService {
         secretAccessKey: secretAccessKey!,
       },
     });
+
+    this.logger.log(
+      this.configurationSetName
+        ? `Configuration Set: ${this.configurationSetName}`
+        : '⚠️ AWS_SES_CONFIGURATION_SET no definido — bounces/complaints no serán notificados',
+    );
   }
 
   private renderTemplate(
