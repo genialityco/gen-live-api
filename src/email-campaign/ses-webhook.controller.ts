@@ -14,7 +14,9 @@ export class SesWebhookController {
 
   @Post('ses-webhook')
   @HttpCode(200)
-  async handleSesWebhook(@Body() payload: Record<string, any>): Promise<void> {
+  async handleSesWebhook(@Body() body: Record<string, any> | string): Promise<void> {
+    // SNS envía Content-Type: text/plain aunque el body sea JSON
+    const payload = typeof body === 'string' ? JSON.parse(body) : body;
     await this.webhookService.handleSnsPayload(payload);
   }
 }
