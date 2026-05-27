@@ -47,6 +47,9 @@ export class EmailDelivery {
 
   @Prop({ type: Date, default: null })
   sentAt: Date | null;
+
+  @Prop({ type: Date, default: null })
+  deliveredAt: Date | null;
 }
 
 export type EmailDeliveryDocument = HydratedDocument<EmailDelivery>;

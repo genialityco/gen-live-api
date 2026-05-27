@@ -145,6 +145,19 @@ export class EmailCampaignService implements OnModuleInit {
   }
 
   async cancelCampaign(campaignId: string): Promise<void> {
+    const campaign = await this.campaignModel
+      .findById(campaignId)
+      .select('status')
+      .lean();
+    if (!campaign) throw new NotFoundException('Campaña no encontrada');
+
+    const nonCancellable = ['completed', 'failed', 'cancelled'];
+    if (nonCancellable.includes(campaign.status)) {
+      throw new BadRequestException(
+        `No se puede cancelar una campaña en estado '${campaign.status}'`,
+      );
+    }
+
     await this.campaignModel.findByIdAndUpdate(campaignId, {
       status: 'cancelled',
     });
@@ -248,6 +261,8 @@ export class EmailCampaignService implements OnModuleInit {
       'stats.sent': 0,
       'stats.rejected': 0,
       'stats.failed': 0,
+      'stats.bounced': 0,
+      'stats.complained': 0,
     });
 
     // Bulk insert de deliveries en estado pending
@@ -379,6 +394,10 @@ export class EmailCampaignService implements OnModuleInit {
       const orgId = campaign.orgId.toString();
       const eventId = campaign.eventId.toString();
 
+      // Compilar templates una sola vez para toda la campaña
+      const compiledSubject = Handlebars.compile(campaign.templateSnapshot.subject);
+      const compiledBody = Handlebars.compile(campaign.templateSnapshot.body);
+
       // Generar iCal una sola vez para toda la campaña
       const frontendUrl = this.configService.get<string>('FRONTEND_URL') ?? '';
       const event = await this.eventModel.findById(campaign.eventId).lean<EventDocument>();
@@ -413,7 +432,8 @@ export class EmailCampaignService implements OnModuleInit {
           batch.map((delivery) =>
             this.sendOneEmail(
               delivery,
-              campaign.templateSnapshot!,
+              compiledSubject,
+              compiledBody,
               orgId,
               eventId,
               org?.name,
@@ -453,7 +473,8 @@ export class EmailCampaignService implements OnModuleInit {
 
   private async sendOneEmail(
     delivery: EmailDeliveryDocument,
-    snapshot: { subject: string; body: string },
+    compiledSubject: HandlebarsTemplateDelegate,
+    compiledBody: HandlebarsTemplateDelegate,
     orgId: string,
     eventId: string,
     fromName: string | undefined,
@@ -471,8 +492,8 @@ export class EmailCampaignService implements OnModuleInit {
         delivery.eventUserId?.toString(),
       );
 
-      const renderedSubject = Handlebars.compile(snapshot.subject)(context);
-      const renderedBody = Handlebars.compile(snapshot.body)(context);
+      const renderedSubject = compiledSubject(context);
+      const renderedBody = compiledBody(context);
       const wrappedHtml = wrapper({ ...context, content: renderedBody });
 
       const { messageId } = icalContent
