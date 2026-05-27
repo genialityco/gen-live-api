@@ -70,7 +70,8 @@ export class SesWebhookService {
       return;
     }
 
-    const notificationType: string = message.notificationType;
+    // SES v1 (legacy) usa "notificationType"; SES v2 (Configuration Set Event Destinations) usa "eventType"
+    const notificationType: string = message.notificationType ?? message.eventType;
     this.logger.log(`SNS notificación recibida: ${notificationType}`);
 
     if (notificationType === 'Bounce') {
