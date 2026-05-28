@@ -15,6 +15,11 @@ export class AudienceFiltersDto {
   eventUserStatus?: string[];
 }
 
+export class UtmParamDto {
+  @IsString() @IsNotEmpty() name: string;
+  @IsString() @IsNotEmpty() value: string;
+}
+
 export class CreateCampaignDto {
   @IsString()
   @IsNotEmpty()
@@ -39,4 +44,10 @@ export class CreateCampaignDto {
   @ValidateNested()
   @Type(() => AudienceFiltersDto)
   audienceFilters?: AudienceFiltersDto;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => UtmParamDto)
+  utmParams?: UtmParamDto[];
 }

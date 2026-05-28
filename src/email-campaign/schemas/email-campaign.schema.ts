@@ -33,6 +33,12 @@ export class AudienceFilters {
   eventUserStatus?: string[];
 }
 
+@Schema({ _id: false })
+export class UtmParam {
+  @Prop({ required: true }) name: string;
+  @Prop({ required: true }) value: string;
+}
+
 @Schema({ timestamps: true })
 export class EmailCampaign {
   @Prop({ type: Types.ObjectId, ref: 'Organization', required: true })
@@ -55,6 +61,9 @@ export class EmailCampaign {
 
   @Prop({ type: AudienceFilters, default: null })
   audienceFilters: AudienceFilters | null;
+
+  @Prop({ type: [UtmParam], default: null })
+  utmParams: UtmParam[] | null;
 
   @Prop({
     required: true,

@@ -117,6 +117,7 @@ export class EmailCampaignService implements OnModuleInit {
       templateId: new Types.ObjectId(dto.templateId),
       targetAudience: dto.targetAudience,
       audienceFilters: dto.audienceFilters ?? null,
+      utmParams: dto.utmParams ?? null,
       status: 'draft',
       createdBy,
     });
@@ -439,6 +440,7 @@ export class EmailCampaignService implements OnModuleInit {
               org?.name,
               wrapper,
               icalContent,
+              campaign.utmParams,
             ),
           ),
         );
@@ -480,6 +482,7 @@ export class EmailCampaignService implements OnModuleInit {
     fromName: string | undefined,
     wrapper: HandlebarsTemplateDelegate,
     icalContent: string | null = null,
+    utmConfig?: any,
   ): Promise<void> {
     const deliveryId = (delivery._id as Types.ObjectId).toString();
     const campaignId = delivery.campaignId.toString();
@@ -490,6 +493,8 @@ export class EmailCampaignService implements OnModuleInit {
         eventId,
         delivery.attendeeId.toString(),
         delivery.eventUserId?.toString(),
+        undefined,
+        utmConfig,
       );
 
       const renderedSubject = compiledSubject(context);

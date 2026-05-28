@@ -18,6 +18,11 @@ export interface AvailableVariable {
   hasDisplayVariant?: boolean;
 }
 
+export interface UtmParam {
+  name: string;
+  value: string;
+}
+
 @Injectable()
 export class EmailVariableService {
   private readonly frontendUrl: string;
@@ -69,6 +74,7 @@ export class EmailVariableService {
         { key: 'event.schedule.startsAt.timezone', label: 'Zona horaria', section: 'Evento' },
         { key: 'event.branding.coverImageUrl', label: 'Imagen de portada', section: 'Evento' },
         { key: 'event.joinUrl', label: 'URL de ingreso', section: 'Evento' },
+        { key: 'event.joinUrlWithUtm', label: 'URL de ingreso con UTMs', section: 'Evento' },
       );
     }
 
@@ -112,6 +118,7 @@ export class EmailVariableService {
     attendeeId: string,
     eventUserId?: string,
     origin?: string,
+    utmParams?: UtmParam[] | null,
   ): Promise<Record<string, any>> {
     const [org, event, attendee] = await Promise.all([
       this.orgModel.findById(new Types.ObjectId(orgId)).lean<Organization>(),
@@ -148,6 +155,7 @@ export class EmailVariableService {
       formDisplay[field.id] = this.resolveDisplayValue(field, raw);
     }
 
+    const joinUrl = this.buildJoinUrl(org, event, origin);
     return {
       org: {
         name: org?.name ?? '',
@@ -164,7 +172,8 @@ export class EmailVariableService {
           endsAt: this.formatDate(event?.schedule?.endsAt),
         },
         branding: event?.branding ?? {},
-        joinUrl: this.buildJoinUrl(org, event, origin),
+        joinUrl,
+        joinUrlWithUtm: this.buildJoinUrlWithUtm(joinUrl, utmParams, form),
       },
       eventUser: {
         status: eventUser?.status ?? '',
@@ -207,6 +216,7 @@ export class EmailVariableService {
       formDisplay[field.id] = this.resolveDisplayValue(field, sample);
     }
 
+    const joinUrl = this.buildJoinUrl(org, event);
     return {
       org: {
         name: org?.name ?? 'Mi Organización',
@@ -223,7 +233,8 @@ export class EmailVariableService {
           endsAt: this.formatDate(event?.schedule?.endsAt),
         },
         branding: event?.branding ?? {},
-        joinUrl: this.buildJoinUrl(org, event),
+        joinUrl,
+        joinUrlWithUtm: joinUrl,
       },
       eventUser: {
         status: 'registered',
@@ -250,6 +261,30 @@ export class EmailVariableService {
     if (!org?.domainSlug || !event?.slug) return '';
     const baseUrl = origin || this.frontendUrl;
     return `${baseUrl}/org/${org.domainSlug}/event/${event.slug}`;
+  }
+
+  /**
+   * Appends UTM query params to a base URL, resolving any `form.*` field references
+   * from the attendee's registration data. Values are URL-encoded.
+   */
+  buildJoinUrlWithUtm(
+    baseUrl: string,
+    utmParams: UtmParam[] | null | undefined,
+    form: Record<string, any>,
+  ): string {
+    if (!baseUrl || !utmParams?.length) return baseUrl;
+
+    const params = new URLSearchParams();
+    for (const { name, value } of utmParams) {
+      if (!name || !value) continue;
+      const resolved = value.startsWith('form.')
+        ? String(form[value.slice(5)] ?? '')
+        : value;
+      if (resolved) params.set(name, resolved);
+    }
+
+    const qs = params.toString();
+    return qs ? `${baseUrl}?${qs}` : baseUrl;
   }
 
   /**
