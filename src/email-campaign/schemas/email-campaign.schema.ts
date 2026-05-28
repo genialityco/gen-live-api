@@ -65,6 +65,9 @@ export class EmailCampaign {
   @Prop({ type: [UtmParam], default: null })
   utmParams: UtmParam[] | null;
 
+  @Prop({ default: false })
+  excludeEventUsers: boolean;
+
   @Prop({
     required: true,
     enum: ['draft', 'sending', 'completed', 'failed', 'cancelled'],

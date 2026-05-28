@@ -547,9 +547,9 @@ export class MediaLibraryService {
       throw new BadRequestException('Solo se permiten videos (MP4/WEBM/MPEG) para upload directo');
     }
 
-    const maxSize = 1024 * 1024 * 1024; // 1 GB
+    const maxSize = 2 * 1024 * 1024 * 1024; // 2 GB
     if (dto.fileSize > maxSize) {
-      throw new BadRequestException('Archivo muy grande (máx 1GB)');
+      throw new BadRequestException('Archivo muy grande (máx 2GB)');
     }
 
     const ext =

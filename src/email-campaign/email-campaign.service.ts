@@ -118,6 +118,7 @@ export class EmailCampaignService implements OnModuleInit {
       targetAudience: dto.targetAudience,
       audienceFilters: dto.audienceFilters ?? null,
       utmParams: dto.utmParams ?? null,
+      excludeEventUsers: dto.excludeEventUsers ?? false,
       status: 'draft',
       createdBy,
     });
@@ -598,19 +599,36 @@ export class EmailCampaignService implements OnModuleInit {
     }
 
     if (audience === 'org_attendees' || audience === 'both') {
+      // Si excludeEventUsers, construir el set de emails ya registrados al evento
+      let eventUserEmailSet: Set<string> | null = null;
+      if (campaign.excludeEventUsers) {
+        const registeredUsers = await this.eventUserModel
+          .find({ eventId })
+          .populate<{ attendeeId: OrgAttendeeDocument }>({
+            path: 'attendeeId',
+            select: 'email',
+          })
+          .lean();
+        eventUserEmailSet = new Set(
+          registeredUsers
+            .map((eu) => (eu.attendeeId as unknown as OrgAttendeeDocument)?.email)
+            .filter(Boolean) as string[],
+        );
+      }
+
       const orgAttendees = await this.orgAttendeeModel
         .find({ organizationId: orgId, ...suppressedFilter })
         .lean<OrgAttendeeDocument[]>();
 
       for (const a of orgAttendees) {
         if (!a.email) continue;
-        if (!recipientMap.has(a.email)) {
-          recipientMap.set(a.email, {
-            attendeeId: (a._id as Types.ObjectId).toString(),
-            email: a.email,
-            name: a.name ?? a.email,
-          });
-        }
+        if (recipientMap.has(a.email)) continue;
+        if (eventUserEmailSet?.has(a.email)) continue;
+        recipientMap.set(a.email, {
+          attendeeId: (a._id as Types.ObjectId).toString(),
+          email: a.email,
+          name: a.name ?? a.email,
+        });
       }
     }
 

@@ -4,6 +4,7 @@ import {
   IsIn,
   IsOptional,
   IsArray,
+  IsBoolean,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -50,4 +51,8 @@ export class CreateCampaignDto {
   @ValidateNested({ each: true })
   @Type(() => UtmParamDto)
   utmParams?: UtmParamDto[];
+
+  @IsOptional()
+  @IsBoolean()
+  excludeEventUsers?: boolean;
 }
