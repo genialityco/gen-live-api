@@ -679,6 +679,20 @@ export class EmailCampaignService implements OnModuleInit {
     });
   }
 
+  async deleteCampaign(campaignId: string): Promise<void> {
+    const campaign = await this.campaignModel.findById(campaignId).lean();
+    if (!campaign) throw new NotFoundException('Campaña no encontrada');
+    if (campaign.status === 'sending') {
+      throw new ConflictException(
+        'No se puede eliminar una campaña en curso. Cancélala primero.',
+      );
+    }
+    await this.deliveryModel.deleteMany({
+      campaignId: new Types.ObjectId(campaignId),
+    });
+    await this.campaignModel.findByIdAndDelete(campaignId);
+  }
+
   async deleteByEventId(eventId: string): Promise<void> {
     const oid = new Types.ObjectId(eventId);
     const campaigns = await this.campaignModel

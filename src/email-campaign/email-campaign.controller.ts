@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Get,
+  Delete,
   Body,
   Param,
   Query,
@@ -54,6 +55,13 @@ export class EmailCampaignController {
   @Post(':campaignId/resume')
   async resumeCampaign(@Param('campaignId') campaignId: string) {
     return this.campaignService.resumeCampaign(campaignId);
+  }
+
+  @Delete(':campaignId')
+  @HttpCode(200)
+  async deleteCampaign(@Param('campaignId') campaignId: string) {
+    await this.campaignService.deleteCampaign(campaignId);
+    return { ok: true };
   }
 
   @Get(':campaignId/deliveries')

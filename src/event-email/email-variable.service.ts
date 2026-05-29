@@ -156,6 +156,13 @@ export class EmailVariableService {
     }
 
     const joinUrl = this.buildJoinUrl(org, event, origin);
+
+    const utmCtx = {
+      event: { slug: event?.slug ?? '', title: event?.title ?? '' },
+      attendee: { id: attendee?._id?.toString() ?? '', email: attendee?.email ?? '' },
+      form,
+    };
+
     return {
       org: {
         name: org?.name ?? '',
@@ -173,7 +180,7 @@ export class EmailVariableService {
         },
         branding: event?.branding ?? {},
         joinUrl,
-        joinUrlWithUtm: this.buildJoinUrlWithUtm(joinUrl, utmParams, form),
+        joinUrlWithUtm: this.buildJoinUrlWithUtm(joinUrl, utmParams, utmCtx),
       },
       eventUser: {
         status: eventUser?.status ?? '',
@@ -264,27 +271,45 @@ export class EmailVariableService {
   }
 
   /**
-   * Appends UTM query params to a base URL, resolving any `form.*` field references
-   * from the attendee's registration data. Values are URL-encoded.
+   * Appends UTM query params to a base URL.
+   * Values that look like a context path (e.g. `event.slug`, `form.field_xxx`,
+   * `attendee.email`) are resolved from `ctx`; plain strings are used as-is.
    */
   buildJoinUrlWithUtm(
     baseUrl: string,
     utmParams: UtmParam[] | null | undefined,
-    form: Record<string, any>,
+    ctx: Record<string, any>,
   ): string {
     if (!baseUrl || !utmParams?.length) return baseUrl;
 
     const params = new URLSearchParams();
     for (const { name, value } of utmParams) {
       if (!name || !value) continue;
-      const resolved = value.startsWith('form.')
-        ? String(form[value.slice(5)] ?? '')
-        : value;
+      const resolved = this.resolveCtxPath(ctx, value);
       if (resolved) params.set(name, resolved);
     }
 
     const qs = params.toString();
     return qs ? `${baseUrl}?${qs}` : baseUrl;
+  }
+
+  /**
+   * Walks a dot-separated path through a nested object.
+   * Returns the stringified value, or the original `path` if unresolvable
+   * (so static text values pass through unchanged).
+   */
+  private resolveCtxPath(ctx: Record<string, any>, path: string): string {
+    const parts = path.split('.');
+    let cur: any = ctx;
+    for (const part of parts) {
+      if (cur == null || typeof cur !== 'object') return path;
+      cur = cur[part];
+    }
+    if (cur == null) return '';
+    const str = String(cur);
+    // If the path was unresolvable and we fell through to the original key,
+    // treat an empty/unchanged result as a static value instead.
+    return str;
   }
 
   /**

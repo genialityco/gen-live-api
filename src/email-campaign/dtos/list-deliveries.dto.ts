@@ -3,7 +3,7 @@ import { Type } from 'class-transformer';
 
 export class ListDeliveriesDto {
   @IsOptional()
-  @IsIn(['pending', 'sent', 'rejected', 'failed'])
+  @IsIn(['pending', 'sent', 'rejected', 'failed', 'bounced', 'complained'])
   status?: string;
 
   @IsOptional()
