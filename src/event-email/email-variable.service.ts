@@ -305,7 +305,7 @@ export class EmailVariableService {
       if (cur == null || typeof cur !== 'object') return path;
       cur = cur[part];
     }
-    if (cur == null) return '';
+    if (cur == null) return parts.length > 1 ? '' : path;
     const str = String(cur);
     // If the path was unresolvable and we fell through to the original key,
     // treat an empty/unchanged result as a static value instead.
