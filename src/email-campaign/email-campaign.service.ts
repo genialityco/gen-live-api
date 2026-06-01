@@ -38,6 +38,7 @@ import { EmailVariableService } from '../event-email/email-variable.service';
 import { MailService } from '../mail/mail.service';
 import { CreateCampaignDto } from './dtos/create-campaign.dto';
 import { ListDeliveriesDto } from './dtos/list-deliveries.dto';
+import { EmailTrackService } from './email-track.service';
 
 const BATCH_SIZE = 10;
 const BATCH_DELAY_MS = 750; // ~13 emails/seg, bajo el límite de SES 14/seg
@@ -66,6 +67,7 @@ export class EmailCampaignService implements OnModuleInit {
     private readonly configService: ConfigService,
     @InjectModel(Event.name)
     private readonly eventModel: Model<EventDocument>,
+    private readonly trackService: EmailTrackService,
   ) {}
 
   // ─── Startup recovery ──────────────────────────────────────────────────────
@@ -498,6 +500,27 @@ export class EmailCampaignService implements OnModuleInit {
         utmConfig,
       );
 
+      // ── Click tracking ────────────────────────────────────────────────────
+      const originalUrl = context.event?.joinUrlWithUtm as string | undefined;
+      if (originalUrl) {
+        // Parse UTM key-value pairs from the resolved URL
+        try {
+          const parsed = new URL(originalUrl);
+          const resolvedUtms: Record<string, string> = {};
+          parsed.searchParams.forEach((val, key) => {
+            resolvedUtms[key] = val;
+          });
+          await this.deliveryModel.findByIdAndUpdate(deliveryId, {
+            resolvedUtms,
+            originalUrl,
+          });
+        } catch {
+          // malformed URL — skip UTM storage, don't block send
+        }
+        context.event.joinUrlWithUtm = this.trackService.buildTrackUrl(deliveryId);
+      }
+      // ─────────────────────────────────────────────────────────────────────
+
       const renderedSubject = compiledSubject(context);
       const renderedBody = compiledBody(context);
       const wrappedHtml = wrapper({ ...context, content: renderedBody });
@@ -703,5 +726,9 @@ export class EmailCampaignService implements OnModuleInit {
       await this.deliveryModel.deleteMany({ campaignId: { $in: campaignIds } });
     }
     await this.campaignModel.deleteMany({ eventId: oid });
+  }
+
+  async getCampaignAnalytics(campaignId: string) {
+    return this.trackService.getCampaignAnalytics(campaignId);
   }
 }

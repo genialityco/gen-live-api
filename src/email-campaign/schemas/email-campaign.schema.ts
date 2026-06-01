@@ -19,6 +19,8 @@ export class CampaignStats {
   @Prop({ default: 0 }) failed: number;
   @Prop({ default: 0 }) bounced: number;
   @Prop({ default: 0 }) complained: number;
+  @Prop({ default: 0 }) clicked: number;
+  @Prop({ default: 0 }) totalClicks: number;
 }
 
 @Schema({ _id: false })

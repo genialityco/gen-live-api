@@ -30,12 +30,19 @@ import { EmailCampaignService } from './email-campaign.service';
 import { EmailCampaignController } from './email-campaign.controller';
 import { SesWebhookService } from './ses-webhook.service';
 import { SesWebhookController } from './ses-webhook.controller';
+import { EmailTrackService } from './email-track.service';
+import { EmailTrackController } from './email-track.controller';
+import {
+  EmailClick,
+  EmailClickSchema,
+} from './schemas/email-click.schema';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: EmailCampaign.name, schema: EmailCampaignSchema },
       { name: EmailDelivery.name, schema: EmailDeliverySchema },
+      { name: EmailClick.name, schema: EmailClickSchema },
       { name: EventUser.name, schema: EventUserSchema },
       { name: OrgAttendee.name, schema: OrgAttendeeSchema },
       { name: Organization.name, schema: OrganizationSchema },
@@ -44,8 +51,8 @@ import { SesWebhookController } from './ses-webhook.controller';
     ]),
     EventEmailModule,
   ],
-  controllers: [EmailCampaignController, SesWebhookController],
-  providers: [EmailCampaignService, SesWebhookService],
+  controllers: [EmailCampaignController, SesWebhookController, EmailTrackController],
+  providers: [EmailCampaignService, SesWebhookService, EmailTrackService],
   exports: [EmailCampaignService],
 })
 export class EmailCampaignModule {}

@@ -41,6 +41,11 @@ export class EmailCampaignController {
     return this.campaignService.getCampaign(campaignId);
   }
 
+  @Get(':campaignId/analytics')
+  async getCampaignAnalytics(@Param('campaignId') campaignId: string) {
+    return this.campaignService.getCampaignAnalytics(campaignId);
+  }
+
   @Post(':campaignId/send')
   async sendCampaign(@Param('campaignId') campaignId: string) {
     return this.campaignService.sendCampaign(campaignId);

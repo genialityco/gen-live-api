@@ -50,6 +50,18 @@ export class EmailDelivery {
 
   @Prop({ type: Date, default: null })
   deliveredAt: Date | null;
+
+  @Prop({ type: Map, of: String, default: {} })
+  resolvedUtms: Map<string, string>;
+
+  @Prop({ type: String, default: null })
+  originalUrl: string | null;
+
+  @Prop({ type: Date, default: null })
+  firstClickAt: Date | null;
+
+  @Prop({ default: 0 })
+  clickCount: number;
 }
 
 export type EmailDeliveryDocument = HydratedDocument<EmailDelivery>;
