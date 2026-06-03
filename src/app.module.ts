@@ -17,6 +17,7 @@ import { MailModule } from './mail/mail.module';
 import { LivekitModule } from './livekit/livekit.module';
 import { EventEmailModule } from './event-email/event-email.module';
 import { EmailCampaignModule } from './email-campaign/email-campaign.module';
+import { WaCampaignModule } from './whatsapp-campaign/wa-campaign.module';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { EmailCampaignModule } from './email-campaign/email-campaign.module';
     LivekitModule,
     EventEmailModule,
     EmailCampaignModule,
+    WaCampaignModule,
   ],
   providers: [
     {

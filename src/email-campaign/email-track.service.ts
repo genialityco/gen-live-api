@@ -16,7 +16,7 @@ import { EmailCampaign } from './schemas/email-campaign.schema';
 export interface CampaignAnalytics {
   totalClicks: number;
   uniqueClickers: number;
-  byUtm: Record<string, Array<{ value: string; clicks: number }>>;
+  byUtm: Record<string, Array<{ value: string; clicks: number; uniqueClickers: number }>>;
 }
 
 @Injectable()
@@ -153,29 +153,47 @@ export class EmailTrackService {
     const totalClicks: number = totals?.totalClicks ?? 0;
     const uniqueClickers: number = totals?.uniqueClickers ?? 0;
 
-    const clickDocs = await this.clickModel
-      .find({ campaignId: campaignObjId, isBot: false })
-      .select('utms')
-      .lean();
-
-    const utmMap: Record<string, Record<string, number>> = {};
-    for (const doc of clickDocs) {
-      const utms = doc.utms as unknown as Record<string, string>;
-      if (!utms) continue;
-      const entries =
-        utms instanceof Map ? [...utms.entries()] : Object.entries(utms);
-      for (const [key, val] of entries) {
-        if (!key || !val) continue;
-        if (!utmMap[key]) utmMap[key] = {};
-        utmMap[key][val] = (utmMap[key][val] ?? 0) + 1;
-      }
-    }
+    // Aggregation en MongoDB: calcula clics totales y clickers únicos por cada valor de UTM
+    // Sin cargar todos los docs en memoria
+    const utmAgg = await this.clickModel.aggregate([
+      { $match: { campaignId: campaignObjId, isBot: false } },
+      // Convierte el mapa de UTMs en array de { k, v } para poder desanidar
+      { $project: { deliveryId: 1, utms: { $objectToArray: '$utms' } } },
+      { $unwind: '$utms' },
+      // Nivel 1: agrupa por (utmKey, utmValue, deliveryId) → cuántos clics hizo esta persona con este UTM
+      {
+        $group: {
+          _id: { utmKey: '$utms.k', utmValue: '$utms.v', deliveryId: '$deliveryId' },
+          clicksPerUser: { $sum: 1 },
+        },
+      },
+      // Nivel 2: agrupa por (utmKey, utmValue) → totalClicks y clickers únicos
+      {
+        $group: {
+          _id: { utmKey: '$_id.utmKey', utmValue: '$_id.utmValue' },
+          uniqueClickers: { $sum: 1 },
+          clicks: { $sum: '$clicksPerUser' },
+        },
+      },
+      // Nivel 3: agrupa por utmKey juntando todos sus valores
+      {
+        $group: {
+          _id: '$_id.utmKey',
+          values: {
+            $push: {
+              value: '$_id.utmValue',
+              clicks: '$clicks',
+              uniqueClickers: '$uniqueClickers',
+            },
+          },
+        },
+      },
+    ]);
 
     const byUtm: CampaignAnalytics['byUtm'] = {};
-    for (const [utmKey, values] of Object.entries(utmMap)) {
-      byUtm[utmKey] = Object.entries(values)
-        .map(([value, clicks]) => ({ value, clicks }))
-        .sort((a, b) => b.clicks - a.clicks);
+    for (const { _id: utmKey, values } of utmAgg) {
+      byUtm[utmKey] = (values as Array<{ value: string; clicks: number; uniqueClickers: number }>)
+        .sort((a, b) => b.uniqueClickers - a.uniqueClickers);
     }
 
     return { totalClicks, uniqueClickers, byUtm };

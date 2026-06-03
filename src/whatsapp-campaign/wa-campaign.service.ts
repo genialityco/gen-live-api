@@ -1,0 +1,397 @@
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
+import { ConfigService } from '@nestjs/config';
+import { WaCampaign, WaCampaignDocument, WaUtmParam } from './schemas/wa-campaign.schema';
+import { WaDelivery, WaDeliveryDocument } from './schemas/wa-delivery.schema';
+import { WaTemplate, WaTemplateDocument, WaTemplateComponent } from './schemas/wa-template.schema';
+import { WaService, MetaMessageComponent } from './wa.service';
+
+const BATCH_SIZE = 20; // Meta Cloud API: cómodo bien por debajo del límite de 80/s
+
+@Injectable()
+export class WaCampaignService {
+  private readonly logger = new Logger(WaCampaignService.name);
+
+  constructor(
+    @InjectModel(WaCampaign.name)
+    private readonly campaignModel: Model<WaCampaignDocument>,
+    @InjectModel(WaDelivery.name)
+    private readonly deliveryModel: Model<WaDeliveryDocument>,
+    @InjectModel(WaTemplate.name)
+    private readonly templateModel: Model<WaTemplateDocument>,
+    @InjectModel('OrgAttendee')
+    private readonly attendeeModel: Model<any>,
+    @InjectModel('Event')
+    private readonly eventModel: Model<any>,
+    @InjectModel('Organization')
+    private readonly orgModel: Model<any>,
+    private readonly waService: WaService,
+    private readonly configService: ConfigService,
+  ) {}
+
+  // ─── CRUD ─────────────────────────────────────────────────────────────────
+
+  async findAll(orgId: string, eventId: string): Promise<WaCampaign[]> {
+    return this.campaignModel
+      .find({ orgId: new Types.ObjectId(orgId), eventId: new Types.ObjectId(eventId) })
+      .sort({ createdAt: -1 })
+      .lean();
+  }
+
+  async findOne(id: string): Promise<WaCampaign> {
+    const campaign = await this.campaignModel.findById(id).lean();
+    if (!campaign) throw new NotFoundException('Campaña no encontrada');
+    return campaign;
+  }
+
+  async create(
+    dto: {
+      orgId: string;
+      eventId: string;
+      name: string;
+      templateId: string;
+      utmParams?: WaUtmParam[];
+    },
+    createdBy: string,
+  ): Promise<WaCampaign> {
+    const template = await this.templateModel.findById(dto.templateId).lean();
+    if (!template) throw new NotFoundException('Template no encontrado');
+    if (template.status !== 'approved') {
+      throw new BadRequestException('El template debe estar aprobado por Meta antes de usarlo');
+    }
+
+    return this.campaignModel.create({
+      orgId: new Types.ObjectId(dto.orgId),
+      eventId: new Types.ObjectId(dto.eventId),
+      name: dto.name,
+      templateId: new Types.ObjectId(dto.templateId),
+      utmParams: dto.utmParams ?? null,
+      createdBy,
+    });
+  }
+
+  async cancel(id: string): Promise<void> {
+    await this.campaignModel.findByIdAndUpdate(id, {
+      $set: { status: 'cancelled' },
+    });
+  }
+
+  // ─── Envío ────────────────────────────────────────────────────────────────
+
+  async send(campaignId: string): Promise<{ total: number }> {
+    const campaign = await this.campaignModel.findById(campaignId);
+    if (!campaign) throw new NotFoundException('Campaña no encontrada');
+    if (campaign.status !== 'draft') {
+      throw new BadRequestException(`No se puede enviar una campaña en estado "${campaign.status}"`);
+    }
+
+    const template = await this.templateModel.findById(campaign.templateId).lean();
+    if (!template || template.status !== 'approved') {
+      throw new BadRequestException('El template no está aprobado');
+    }
+
+    const [event, org] = await Promise.all([
+      this.eventModel.findById(campaign.eventId).lean(),
+      this.orgModel.findById(campaign.orgId).lean(),
+    ]);
+    if (!event || !org) throw new NotFoundException('Evento u organización no encontrado');
+
+    // Attendees con teléfono válido de esta org
+    const attendees = await this.attendeeModel
+      .find({
+        organizationId: campaign.orgId.toString(),
+        phone: { $nin: [null, ''] },
+        phoneStatus: 'valid',
+      })
+      .lean();
+
+    if (attendees.length === 0) {
+      throw new BadRequestException('No hay asistentes con teléfono válido para enviar');
+    }
+
+    // Crear deliveries pendientes y actualizar stats iniciales
+    const deliveryDocs = attendees.map((a: any) => ({
+      campaignId: campaign._id,
+      orgId: campaign.orgId,
+      eventId: campaign.eventId,
+      attendeeId: a._id,
+      phone: a.phone,
+      name: a.name,
+      status: 'pending',
+    }));
+
+    await this.deliveryModel.insertMany(deliveryDocs, { ordered: false });
+
+    await campaign.updateOne({
+      $set: {
+        status: 'sending',
+        startedAt: new Date(),
+        templateSnapshot: {
+          name: template.name,
+          language: template.language,
+          components: template.components,
+          variableMappings: template.variableMappings,
+        },
+        'stats.total': attendees.length,
+        'stats.pending': attendees.length,
+      },
+    });
+
+    // Procesar en batches de forma async (no bloquea la respuesta HTTP)
+    this.processBatches(campaign._id.toString(), template, event, org).catch((err) =>
+      this.logger.error(`Error en batch de campaña ${campaignId}: ${err.message}`),
+    );
+
+    return { total: attendees.length };
+  }
+
+  private async processBatches(
+    campaignId: string,
+    template: WaTemplate,
+    event: any,
+    org: any,
+  ): Promise<void> {
+    const campaignObjId = new Types.ObjectId(campaignId);
+
+    try {
+      while (true) {
+        const batch = await this.deliveryModel
+          .find({ campaignId: campaignObjId, status: 'pending' })
+          .limit(BATCH_SIZE)
+          .lean();
+
+        if (batch.length === 0) break;
+
+        const campaign = await this.campaignModel.findById(campaignId).lean();
+        if (!campaign || campaign.status === 'cancelled') break;
+
+        await Promise.all(
+          batch.map((delivery) =>
+            this.processSingleDelivery(delivery, template, event, org, campaign.utmParams ?? []),
+          ),
+        );
+      }
+
+      // Marcar completada si no fue cancelada
+      const current = await this.campaignModel.findById(campaignId).lean();
+      if (current?.status === 'sending') {
+        await this.campaignModel.findByIdAndUpdate(campaignId, {
+          $set: { status: 'completed', completedAt: new Date() },
+        });
+      }
+    } catch (err) {
+      await this.campaignModel.findByIdAndUpdate(campaignId, {
+        $set: { status: 'failed' },
+      });
+      throw err;
+    }
+  }
+
+  private async processSingleDelivery(
+    delivery: any,
+    template: WaTemplate,
+    event: any,
+    org: any,
+    utmParams: WaUtmParam[],
+  ): Promise<void> {
+    const attendee = await this.attendeeModel.findById(delivery.attendeeId).lean();
+    if (!attendee) return;
+
+    const resolved = this.resolveVariables(
+      template.variableMappings,
+      attendee,
+      event,
+      org,
+      utmParams,
+      delivery._id.toString(),
+    );
+
+    const components = this.buildMessageComponents(template.components, resolved);
+
+    try {
+      const result = await this.waService.sendTemplate(
+        delivery.phone,
+        template.name,
+        template.language,
+        components,
+      );
+
+      await this.deliveryModel.findByIdAndUpdate(delivery._id, {
+        $set: {
+          status: 'sent',
+          waMessageId: result.messageId,
+          resolvedComponents: resolved,
+          resolvedUtms: this.buildResolvedUtms(utmParams, attendee, event),
+          sentAt: new Date(),
+        },
+      });
+
+      await this.campaignModel.findByIdAndUpdate(delivery.campaignId, {
+        $inc: { 'stats.sent': 1, 'stats.pending': -1 },
+      });
+    } catch (err: any) {
+      await this.deliveryModel.findByIdAndUpdate(delivery._id, {
+        $set: {
+          status: 'failed',
+          errorMessage: err.message ?? 'Error desconocido',
+        },
+      });
+
+      await this.campaignModel.findByIdAndUpdate(delivery.campaignId, {
+        $inc: { 'stats.failed': 1, 'stats.pending': -1 },
+      });
+    }
+  }
+
+  // ─── Resolución de variables ──────────────────────────────────────────────
+
+  private resolveVariables(
+    mappings: Record<string, string>,
+    attendee: any,
+    event: any,
+    org: any,
+    utmParams: WaUtmParam[],
+    deliveryId: string,
+  ): Record<string, string> {
+    const resolved: Record<string, string> = {};
+
+    for (const [key, source] of Object.entries(mappings)) {
+      resolved[key] = this.resolveSource(source, attendee, event, org, utmParams, deliveryId);
+    }
+
+    return resolved;
+  }
+
+  private resolveSource(
+    source: string,
+    attendee: any,
+    event: any,
+    org: any,
+    utmParams: WaUtmParam[],
+    deliveryId: string,
+  ): string {
+    switch (source) {
+      case 'attendee.name':
+        return attendee.name ?? '';
+      case 'event.title':
+        return event.title ?? '';
+      case 'event.startDate': {
+        const date = event.schedule?.startsAt;
+        if (!date) return '';
+        return new Intl.DateTimeFormat('es', {
+          dateStyle: 'long',
+          timeStyle: 'short',
+          timeZone: 'America/Bogota',
+        }).format(new Date(date));
+      }
+      case 'event.slug':
+        return event.slug ?? '';
+      case 'org.slug':
+        return org.domainSlug ?? '';
+      case '_tracking_url': {
+        const token = Buffer.from(deliveryId).toString('base64url');
+        const apiUrl = this.configService.get<string>('API_URL') ?? `http://localhost:${this.configService.get('PORT') ?? 8080}`;
+        return `${apiUrl}/track/wa-click/${token}`;
+      }
+      default:
+        // Soporte para campos custom del form: "form.telefono", "attendee.registrationData.campo"
+        if (source.startsWith('form.')) {
+          const field = source.slice(5);
+          return attendee.registrationData?.[field] ?? '';
+        }
+        return '';
+    }
+  }
+
+  private buildResolvedUtms(
+    utmParams: WaUtmParam[],
+    attendee: any,
+    event: any,
+  ): Record<string, string> {
+    const result: Record<string, string> = {};
+    for (const p of utmParams) {
+      let value = p.value;
+      if (value.startsWith('attendee.')) {
+        const field = value.slice(9);
+        value = attendee[field] ?? attendee.registrationData?.[field] ?? p.value;
+      } else if (value.startsWith('event.')) {
+        const field = value.slice(6);
+        value = event[field] ?? p.value;
+      } else if (value.startsWith('form.')) {
+        const field = value.slice(5);
+        value = attendee.registrationData?.[field] ?? p.value;
+      }
+      result[p.name] = value;
+    }
+    return result;
+  }
+
+  private buildMessageComponents(
+    templateComponents: WaTemplateComponent[],
+    resolved: Record<string, string>,
+  ): MetaMessageComponent[] {
+    const result: MetaMessageComponent[] = [];
+
+    const bodyComp = templateComponents.find((c) => c.type === 'BODY');
+    if (bodyComp) {
+      const params: string[] = [];
+      let i = 1;
+      while (resolved[`body.${i}`] !== undefined) {
+        params.push(resolved[`body.${i}`]);
+        i++;
+      }
+      if (params.length > 0) {
+        result.push({
+          type: 'body',
+          parameters: params.map((t) => ({ type: 'text', text: t })),
+        });
+      }
+    }
+
+    const buttonsComp = templateComponents.find((c) => c.type === 'BUTTONS');
+    if (buttonsComp?.buttons) {
+      buttonsComp.buttons.forEach((btn, idx) => {
+        const paramKey = `button.${idx}.1`;
+        if (btn.type === 'URL' && resolved[paramKey]) {
+          result.push({
+            type: 'button',
+            sub_type: 'url',
+            index: idx,
+            parameters: [{ type: 'text', text: resolved[paramKey] }],
+          });
+        }
+      });
+    }
+
+    return result;
+  }
+
+  // ─── Deliveries ───────────────────────────────────────────────────────────
+
+  async listDeliveries(
+    campaignId: string,
+    opts: { status?: string; page?: number; limit?: number },
+  ): Promise<{ data: WaDelivery[]; total: number }> {
+    const { status, page = 1, limit = 50 } = opts;
+    const filter: any = { campaignId: new Types.ObjectId(campaignId) };
+    if (status && status !== 'all') filter.status = status;
+
+    const [data, total] = await Promise.all([
+      this.deliveryModel
+        .find(filter)
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .sort({ createdAt: 1 })
+        .lean(),
+      this.deliveryModel.countDocuments(filter),
+    ]);
+
+    return { data, total };
+  }
+}

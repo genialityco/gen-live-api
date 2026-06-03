@@ -23,6 +23,16 @@ export class OrgAttendee extends Document {
   @Prop({ type: [String], default: [] })
   eventIds: string[]; // IDs de eventos a los que se ha registrado/inscrito (no asistencia en vivo)
 
+  @Prop({ type: String, default: null })
+  phone: string | null; // Formato internacional sin +, ej: 521234567890
+
+  @Prop({
+    type: String,
+    enum: ['valid', 'invalid', 'opted_out'],
+    default: 'valid',
+  })
+  phoneStatus: 'valid' | 'invalid' | 'opted_out';
+
   // ─── Campos de estado de email (actualizados por webhooks de AWS SES) ───────
 
   @Prop({
@@ -47,4 +57,5 @@ export const OrgAttendeeSchema = SchemaFactory.createForClass(OrgAttendee);
 
 // Índice único por organización y email
 OrgAttendeeSchema.index({ organizationId: 1, email: 1 }, { unique: true });
+OrgAttendeeSchema.index({ organizationId: 1, phone: 1 }, { sparse: true });
 OrgAttendeeSchema.index({ emailStatus: 1 });
