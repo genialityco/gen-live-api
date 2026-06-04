@@ -146,15 +146,13 @@ export class EmailSendService {
   private buildIcal(
     event: EventDocument,
     orgSlug: string,
+    orgName: string,
     frontendUrl: string,
   ): string | null {
     if (!event.schedule?.startsAt) return null;
 
     const formatDate = (d: Date): string =>
-      d
-        .toISOString()
-        .replace(/[-:]/g, '')
-        .replace(/\.\d{3}Z$/, 'Z');
+      d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 
     const startsAt = new Date(event.schedule.startsAt);
     const endsAt = event.schedule.endsAt
@@ -162,7 +160,12 @@ export class EmailSendService {
       : new Date(startsAt.getTime() + 60 * 60 * 1000);
 
     const uid = `test-${(event._id as Types.ObjectId).toString()}@geniality.io`;
-    const eventUrl = `${frontendUrl}/org/${orgSlug}/event/${event.slug}`;
+    const attendUrl = `${frontendUrl}/org/${orgSlug}/event/${event.slug}/attend`;
+    const summary = orgName ? `${orgName}: ${event.title}` : event.title;
+
+    const descriptionParts: string[] = [];
+    if (event.description) descriptionParts.push(event.description);
+    descriptionParts.push(`Accede al evento: ${attendUrl}`);
 
     const lines = [
       'BEGIN:VCALENDAR',
@@ -175,16 +178,35 @@ export class EmailSendService {
       `DTSTAMP:${formatDate(new Date())}`,
       `DTSTART:${formatDate(startsAt)}`,
       `DTEND:${formatDate(endsAt)}`,
-      `SUMMARY:${this.escapeIcal(event.title)}`,
-      `URL:${eventUrl}`,
+      `SUMMARY:${this.escapeIcal(summary)}`,
+      `URL:${attendUrl}`,
+      `LOCATION:${attendUrl}`,
+      `DESCRIPTION:${this.escapeIcal(descriptionParts.join('\n\n'))}`,
     ];
 
-    if (event.description) {
-      lines.push(`DESCRIPTION:${this.escapeIcal(event.description)}`);
+    lines.push('END:VEVENT', 'END:VCALENDAR');
+    return lines.map((l) => this.foldIcalLine(l)).join('\r\n');
+  }
+
+  /** RFC 5545 §3.1: fold lines > 75 octets with CRLF + SPACE. */
+  private foldIcalLine(line: string): string {
+    const buf = Buffer.from(line, 'utf8');
+    if (buf.length <= 75) return line;
+
+    const parts: string[] = [];
+    let offset = 0;
+    let first = true;
+
+    while (offset < buf.length) {
+      const limit = first ? 75 : 74;
+      let end = Math.min(offset + limit, buf.length);
+      while (end < buf.length && (buf[end] & 0xc0) === 0x80) end--;
+      parts.push((first ? '' : ' ') + buf.slice(offset, end).toString('utf8'));
+      offset = end;
+      first = false;
     }
 
-    lines.push('END:VEVENT', 'END:VCALENDAR');
-    return lines.join('\r\n');
+    return parts.join('\r\n');
   }
 
   private escapeIcal(text: string): string {
@@ -261,7 +283,7 @@ export class EmailSendService {
       if (event) {
         const frontendUrl =
           this.configService.get<string>('FRONTEND_URL') ?? '';
-        icalContent = this.buildIcal(event, org?.domainSlug ?? '', frontendUrl);
+        icalContent = this.buildIcal(event, org?.domainSlug ?? '', org?.name ?? '', frontendUrl);
       }
     }
 

@@ -14,6 +14,7 @@ import { join } from 'path';
 import {
   EmailCampaign,
   EmailCampaignDocument,
+  UtmParam,
 } from './schemas/email-campaign.schema';
 import {
   EmailDelivery,
@@ -330,6 +331,8 @@ export class EmailCampaignService implements OnModuleInit {
     campaignId: string,
     frontendUrl: string,
     orgSlug: string,
+    orgName: string,
+    utmParams: UtmParam[] | null,
   ): string | null {
     if (!event.schedule?.startsAt) return null;
 
@@ -343,7 +346,16 @@ export class EmailCampaignService implements OnModuleInit {
 
     const dtstamp = formatDate(new Date());
     const uid = `${campaignId}-${(event._id as Types.ObjectId).toString()}@geniality.io`;
-    const eventUrl = `${frontendUrl}/org/${orgSlug}/event/${event.slug}`;
+
+    const utmQuery = this.buildUtmQuery(campaignId, utmParams);
+    const attendUrl = `${frontendUrl}/org/${orgSlug}/event/${event.slug}/attend`;
+    const attendUrlWithUtm = `${attendUrl}?${utmQuery}`;
+
+    const summary = orgName ? `${orgName}: ${event.title}` : event.title;
+
+    const descriptionParts: string[] = [];
+    if (event.description) descriptionParts.push(event.description);
+    descriptionParts.push(`Accede al evento: ${attendUrlWithUtm}`);
 
     const lines = [
       'BEGIN:VCALENDAR',
@@ -356,16 +368,51 @@ export class EmailCampaignService implements OnModuleInit {
       `DTSTAMP:${dtstamp}`,
       `DTSTART:${formatDate(startsAt)}`,
       `DTEND:${formatDate(endsAt)}`,
-      `SUMMARY:${this.escapeIcal(event.title)}`,
-      `URL:${eventUrl}`,
+      `SUMMARY:${this.escapeIcal(summary)}`,
+      `URL:${attendUrlWithUtm}`,
+      `LOCATION:${attendUrlWithUtm}`,
+      `DESCRIPTION:${this.escapeIcal(descriptionParts.join('\n\n'))}`,
     ];
 
-    if (event.description) {
-      lines.push(`DESCRIPTION:${this.escapeIcal(event.description)}`);
+    lines.push('END:VEVENT', 'END:VCALENDAR');
+    return lines.map((l) => this.foldIcalLine(l)).join('\r\n');
+  }
+
+  /**
+   * RFC 5545 §3.1: fold lines longer than 75 octets inserting CRLF + SPACE.
+   * Continuation lines start with a single space (counts as 1 byte of the 75 limit).
+   * Never splits in the middle of a UTF-8 multi-byte sequence.
+   */
+  private foldIcalLine(line: string): string {
+    const buf = Buffer.from(line, 'utf8');
+    if (buf.length <= 75) return line;
+
+    const parts: string[] = [];
+    let offset = 0;
+    let first = true;
+
+    while (offset < buf.length) {
+      const limit = first ? 75 : 74; // continuation lines lose 1 byte to the leading space
+      let end = Math.min(offset + limit, buf.length);
+      // Step back if we'd split a multi-byte UTF-8 sequence (continuation bytes = 0x80–0xBF)
+      while (end < buf.length && (buf[end] & 0xc0) === 0x80) end--;
+      parts.push((first ? '' : ' ') + buf.slice(offset, end).toString('utf8'));
+      offset = end;
+      first = false;
     }
 
-    lines.push('END:VEVENT', 'END:VCALENDAR');
-    return lines.join('\r\n');
+    return parts.join('\r\n');
+  }
+
+  private buildUtmQuery(campaignId: string, extra: UtmParam[] | null): string {
+    const params = new URLSearchParams();
+    params.set('utm_source', 'email');
+    params.set('utm_medium', 'campaign');
+    params.set('utm_campaign', campaignId);
+    for (const p of extra ?? []) {
+      params.set(p.name, p.value);
+    }
+    return params.toString();
   }
 
   private escapeIcal(text: string): string {
@@ -406,7 +453,14 @@ export class EmailCampaignService implements OnModuleInit {
       const frontendUrl = this.configService.get<string>('FRONTEND_URL') ?? '';
       const event = await this.eventModel.findById(campaign.eventId).lean<EventDocument>();
       const icalContent = event
-        ? this.buildIcal(event, campaignId, frontendUrl, org?.domainSlug ?? '')
+        ? this.buildIcal(
+            event,
+            campaignId,
+            frontendUrl,
+            org?.domainSlug ?? '',
+            org?.name ?? '',
+            campaign.utmParams,
+          )
         : null;
 
       // Procesar en batches todos los deliveries pendientes
