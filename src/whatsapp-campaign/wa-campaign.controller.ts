@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Patch,
+  Delete,
   Body,
   Param,
   Query,
@@ -74,6 +75,18 @@ export class WaCampaignController {
     return this.campaignService.findAll(orgId, eventId);
   }
 
+  @Get(':id/preview-recipients')
+  previewRecipients(
+    @Param('id') id: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.campaignService.previewRecipients(id, {
+      page: page ? parseInt(page) : 1,
+      limit: limit ? parseInt(limit) : 50,
+    });
+  }
+
   @Get(':id')
   getCampaign(@Param('id') id: string) {
     return this.campaignService.findOne(id);
@@ -103,6 +116,12 @@ export class WaCampaignController {
   @Patch(':id/cancel')
   cancelCampaign(@Param('id') id: string) {
     return this.campaignService.cancel(id);
+  }
+
+  @Delete(':id')
+  @HttpCode(204)
+  deleteCampaign(@Param('id') id: string) {
+    return this.campaignService.delete(id);
   }
 
   @Get(':id/deliveries')

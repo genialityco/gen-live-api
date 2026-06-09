@@ -82,6 +82,18 @@ export class WaCampaignService {
     });
   }
 
+  async delete(id: string): Promise<void> {
+    const campaign = await this.campaignModel.findById(id).lean();
+    if (!campaign) throw new NotFoundException('Campaña no encontrada');
+    if (campaign.status === 'sending') {
+      throw new BadRequestException('No se puede eliminar una campaña mientras está enviando');
+    }
+    await Promise.all([
+      this.campaignModel.findByIdAndDelete(id),
+      this.deliveryModel.deleteMany({ campaignId: new Types.ObjectId(id) }),
+    ]);
+  }
+
   // ─── Envío ────────────────────────────────────────────────────────────────
 
   async send(campaignId: string): Promise<{ total: number }> {
@@ -102,29 +114,48 @@ export class WaCampaignService {
     ]);
     if (!event || !org) throw new NotFoundException('Evento u organización no encontrado');
 
-    // Attendees con teléfono válido de esta org
-    const attendees = await this.attendeeModel
-      .find({
-        organizationId: campaign.orgId.toString(),
-        phone: { $nin: [null, ''] },
-        phoneStatus: 'valid',
-      })
-      .lean();
+    const { telefonoFieldId, codigoPaisFieldId } = this.getOrgPhoneFieldIds(org);
 
-    if (attendees.length === 0) {
-      throw new BadRequestException('No hay asistentes con teléfono válido para enviar');
+    // Buscar attendees con teléfono — priorizar registrationData si la org tiene esos campos
+    let rawAttendees: any[];
+    if (telefonoFieldId) {
+      rawAttendees = await this.attendeeModel
+        .find({
+          organizationId: campaign.orgId.toString(),
+          [`registrationData.${telefonoFieldId}`]: { $exists: true, $nin: [null, ''] },
+        })
+        .lean();
+    } else {
+      rawAttendees = await this.attendeeModel
+        .find({
+          organizationId: campaign.orgId.toString(),
+          phone: { $nin: [null, ''] },
+          phoneStatus: 'valid',
+        })
+        .lean();
     }
 
-    // Crear deliveries pendientes y actualizar stats iniciales
-    const deliveryDocs = attendees.map((a: any) => ({
-      campaignId: campaign._id,
-      orgId: campaign.orgId,
-      eventId: campaign.eventId,
-      attendeeId: a._id,
-      phone: a.phone,
-      name: a.name,
-      status: 'pending',
-    }));
+    // Resolver teléfono por attendee y descartar los inválidos
+    const deliveryDocs: any[] = [];
+    for (const a of rawAttendees) {
+      const phone = telefonoFieldId
+        ? this.buildPhoneFromRegistrationData(a, telefonoFieldId, codigoPaisFieldId)
+        : (a as any).phone;
+      if (!phone || phone.replace(/\D/g, '').length < 7) continue;
+      deliveryDocs.push({
+        campaignId: campaign._id,
+        orgId: campaign.orgId,
+        eventId: campaign.eventId,
+        attendeeId: (a as any)._id,
+        phone,
+        name: (a as any).name,
+        status: 'pending',
+      });
+    }
+
+    if (deliveryDocs.length === 0) {
+      throw new BadRequestException('No hay asistentes con teléfono válido para enviar');
+    }
 
     await this.deliveryModel.insertMany(deliveryDocs, { ordered: false });
 
@@ -138,8 +169,8 @@ export class WaCampaignService {
           components: template.components,
           variableMappings: template.variableMappings,
         },
-        'stats.total': attendees.length,
-        'stats.pending': attendees.length,
+        'stats.total': deliveryDocs.length,
+        'stats.pending': deliveryDocs.length,
       },
     });
 
@@ -148,7 +179,7 @@ export class WaCampaignService {
       this.logger.error(`Error en batch de campaña ${campaignId}: ${err.message}`),
     );
 
-    return { total: attendees.length };
+    return { total: deliveryDocs.length };
   }
 
   private async processBatches(
@@ -370,6 +401,106 @@ export class WaCampaignService {
     }
 
     return result;
+  }
+
+  // ─── Helpers: campos de teléfono por org ─────────────────────────────────
+
+  private getOrgPhoneFieldIds(org: any): {
+    telefonoFieldId: string | null;
+    codigoPaisFieldId: string | null;
+  } {
+    const fields: any[] = org?.registrationForm?.fields ?? [];
+    const telefonoField = fields.find(
+      (f: any) => typeof f.id === 'string' && f.id.startsWith('telefono_'),
+    );
+    const codigoPaisField = fields.find(
+      (f: any) => typeof f.id === 'string' && f.id.startsWith('codigo_pais_'),
+    );
+    return {
+      telefonoFieldId: telefonoField?.id ?? null,
+      codigoPaisFieldId: codigoPaisField?.id ?? null,
+    };
+  }
+
+  /**
+   * Construye el número de teléfono E.164 (sin '+') a partir de registrationData.
+   * Combina codigo_pais_* (ej: "+57") con telefono_* (ej: "3001234567") → "573001234567".
+   * Si el telefono ya incluye el código (empieza con '+' o con los dígitos del código), no lo duplica.
+   */
+  private buildPhoneFromRegistrationData(
+    attendee: any,
+    telefonoFieldId: string,
+    codigoPaisFieldId: string | null,
+  ): string | null {
+    const rawTel = String(attendee.registrationData?.[telefonoFieldId] ?? '').trim();
+    if (!rawTel) return null;
+
+    // Ya viene en formato E.164 con '+': strip el + y devolver
+    if (rawTel.startsWith('+')) {
+      return rawTel.slice(1).replace(/\D/g, '') || null;
+    }
+
+    const rawCodigo = codigoPaisFieldId
+      ? String(attendee.registrationData?.[codigoPaisFieldId] ?? '').trim()
+      : '';
+    const codigoDigits = rawCodigo.replace(/^\+/, '').replace(/\D/g, '');
+    const telDigits = rawTel.replace(/\D/g, '');
+
+    if (!telDigits) return null;
+
+    // Evitar duplicar el código si ya está embebido en el telefono
+    if (codigoDigits && telDigits.startsWith(codigoDigits) && telDigits.length > codigoDigits.length) {
+      return telDigits;
+    }
+
+    return codigoDigits ? codigoDigits + telDigits : telDigits;
+  }
+
+  // ─── Preview destinatarios (antes de enviar) ─────────────────────────────
+
+  async previewRecipients(
+    campaignId: string,
+    opts: { page?: number; limit?: number },
+  ): Promise<{ data: { phone: string; name: string }[]; total: number }> {
+    const campaign = await this.campaignModel.findById(campaignId).lean();
+    if (!campaign) throw new NotFoundException('Campaña no encontrada');
+
+    const org = await this.orgModel.findById(campaign.orgId).lean();
+    const { telefonoFieldId, codigoPaisFieldId } = this.getOrgPhoneFieldIds(org);
+
+    const { page = 1, limit = 50 } = opts;
+
+    let filter: any;
+    if (telefonoFieldId) {
+      filter = {
+        organizationId: campaign.orgId.toString(),
+        [`registrationData.${telefonoFieldId}`]: { $exists: true, $nin: [null, ''] },
+      };
+    } else {
+      filter = {
+        organizationId: campaign.orgId.toString(),
+        phone: { $nin: [null, ''] },
+        phoneStatus: 'valid',
+      };
+    }
+
+    const [rawData, total] = await Promise.all([
+      this.attendeeModel
+        .find(filter)
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean<any[]>(),
+      this.attendeeModel.countDocuments(filter),
+    ]);
+
+    const data = rawData.map((a) => ({
+      phone: telefonoFieldId
+        ? (this.buildPhoneFromRegistrationData(a, telefonoFieldId, codigoPaisFieldId) ?? '')
+        : (a.phone ?? ''),
+      name: a.name ?? '',
+    }));
+
+    return { data, total };
   }
 
   // ─── Deliveries ───────────────────────────────────────────────────────────
