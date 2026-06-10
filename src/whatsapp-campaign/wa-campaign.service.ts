@@ -6,13 +6,18 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import { ConfigService } from '@nestjs/config';
 import { WaCampaign, WaCampaignDocument, WaUtmParam } from './schemas/wa-campaign.schema';
 import { WaDelivery, WaDeliveryDocument } from './schemas/wa-delivery.schema';
 import { WaTemplate, WaTemplateDocument, WaTemplateComponent } from './schemas/wa-template.schema';
 import { WaService, MetaMessageComponent } from './wa.service';
 
 const BATCH_SIZE = 20; // Meta Cloud API: cómodo bien por debajo del límite de 80/s
+
+export interface WaCampaignAnalytics {
+  totalClicks: number;
+  uniqueClickers: number;
+  byUtm: Record<string, Array<{ value: string; clicks: number; uniqueClickers: number }>>;
+}
 
 @Injectable()
 export class WaCampaignService {
@@ -32,7 +37,6 @@ export class WaCampaignService {
     @InjectModel('Organization')
     private readonly orgModel: Model<any>,
     private readonly waService: WaService,
-    private readonly configService: ConfigService,
   ) {}
 
   // ─── CRUD ─────────────────────────────────────────────────────────────────
@@ -234,12 +238,13 @@ export class WaCampaignService {
     const attendee = await this.attendeeModel.findById(delivery.attendeeId).lean();
     if (!attendee) return;
 
+    const resolvedUtms = this.buildResolvedUtms(utmParams, attendee, event);
     const resolved = this.resolveVariables(
       template.variableMappings,
       attendee,
       event,
       org,
-      utmParams,
+      resolvedUtms,
       delivery._id.toString(),
     );
 
@@ -258,7 +263,7 @@ export class WaCampaignService {
           status: 'sent',
           waMessageId: result.messageId,
           resolvedComponents: resolved,
-          resolvedUtms: this.buildResolvedUtms(utmParams, attendee, event),
+          resolvedUtms,
           sentAt: new Date(),
         },
       });
@@ -287,13 +292,13 @@ export class WaCampaignService {
     attendee: any,
     event: any,
     org: any,
-    utmParams: WaUtmParam[],
+    resolvedUtms: Record<string, string>,
     deliveryId: string,
   ): Record<string, string> {
     const resolved: Record<string, string> = {};
 
     for (const [key, source] of Object.entries(mappings)) {
-      resolved[key] = this.resolveSource(source, attendee, event, org, utmParams, deliveryId);
+      resolved[key] = this.resolveSource(source, attendee, event, org, resolvedUtms, deliveryId);
     }
 
     return resolved;
@@ -304,7 +309,7 @@ export class WaCampaignService {
     attendee: any,
     event: any,
     org: any,
-    utmParams: WaUtmParam[],
+    resolvedUtms: Record<string, string>,
     deliveryId: string,
   ): string {
     switch (source) {
@@ -327,8 +332,12 @@ export class WaCampaignService {
         return org.domainSlug ?? '';
       case '_tracking_url': {
         const token = Buffer.from(deliveryId).toString('base64url');
-        const apiUrl = this.configService.get<string>('API_URL') ?? `http://localhost:${this.configService.get('PORT') ?? 8080}`;
-        return `${apiUrl}/track/wa-click/${token}`;
+        const params = new URLSearchParams();
+        for (const [key, value] of Object.entries(resolvedUtms)) {
+          if (value) params.set(key, value);
+        }
+        params.set('_tc', token);
+        return `org/${org.domainSlug ?? ''}/event/${event.slug ?? ''}/attend?${params.toString()}`;
       }
       default:
         // Soporte para campos custom del form: "form.telefono", "attendee.registrationData.campo"
@@ -524,5 +533,63 @@ export class WaCampaignService {
     ]);
 
     return { data, total };
+  }
+
+  // ─── Analítica de clics por UTM ──────────────────────────────────────────
+
+  async getCampaignAnalytics(campaignId: string): Promise<WaCampaignAnalytics> {
+    if (!Types.ObjectId.isValid(campaignId)) {
+      throw new NotFoundException('Campaña no encontrada');
+    }
+
+    const campaignObjId = new Types.ObjectId(campaignId);
+
+    const [totals] = await this.deliveryModel.aggregate([
+      { $match: { campaignId: campaignObjId, clickCount: { $gt: 0 } } },
+      {
+        $group: {
+          _id: null,
+          totalClicks: { $sum: '$clickCount' },
+          uniqueClickers: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const totalClicks: number = totals?.totalClicks ?? 0;
+    const uniqueClickers: number = totals?.uniqueClickers ?? 0;
+
+    // Agrupa los clics por cada par (clave, valor) de resolvedUtms
+    const utmAgg = await this.deliveryModel.aggregate([
+      { $match: { campaignId: campaignObjId, clickCount: { $gt: 0 } } },
+      { $project: { clickCount: 1, resolvedUtms: { $objectToArray: '$resolvedUtms' } } },
+      { $unwind: '$resolvedUtms' },
+      {
+        $group: {
+          _id: { utmKey: '$resolvedUtms.k', utmValue: '$resolvedUtms.v' },
+          uniqueClickers: { $sum: 1 },
+          clicks: { $sum: '$clickCount' },
+        },
+      },
+      {
+        $group: {
+          _id: '$_id.utmKey',
+          values: {
+            $push: {
+              value: '$_id.utmValue',
+              clicks: '$clicks',
+              uniqueClickers: '$uniqueClickers',
+            },
+          },
+        },
+      },
+    ]);
+
+    const byUtm: WaCampaignAnalytics['byUtm'] = {};
+    for (const { _id: utmKey, values } of utmAgg) {
+      byUtm[utmKey] = (values as Array<{ value: string; clicks: number; uniqueClickers: number }>)
+        .sort((a, b) => b.uniqueClickers - a.uniqueClickers);
+    }
+
+    return { totalClicks, uniqueClickers, byUtm };
   }
 }

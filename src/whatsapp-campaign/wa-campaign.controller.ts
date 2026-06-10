@@ -137,4 +137,9 @@ export class WaCampaignController {
       limit: limit ? parseInt(limit) : 50,
     });
   }
+
+  @Get(':id/analytics')
+  getAnalytics(@Param('id') id: string) {
+    return this.campaignService.getCampaignAnalytics(id);
+  }
 }

@@ -107,7 +107,7 @@ function extractEmbeddedCode(rawPhone, knownCode) {
   if (parenMatch) {
     return {
       code: '+' + parenMatch[1],
-      local: parenMatch[2].trim(),
+      local: cleanLocal(parenMatch[2]),
       method: 'parens',
     };
   }
@@ -119,13 +119,13 @@ function extractEmbeddedCode(rawPhone, knownCode) {
     if (knownCode) {
       const c = knownCode.slice(1);
       if (digits.startsWith(c) && digits.length > c.length) {
-        return { code: knownCode, local: digits.slice(c.length).trim(), method: '+prefix(known)' };
+        return { code: knownCode, local: cleanLocal(digits.slice(c.length)), method: '+prefix(known)' };
       }
     }
     // Luego con la lista general
     for (const c of KNOWN_CODES) {
       if (digits.startsWith(c) && digits.length > c.length) {
-        return { code: '+' + c, local: digits.slice(c.length).trim(), method: '+prefix(list)' };
+        return { code: '+' + c, local: cleanLocal(digits.slice(c.length)), method: '+prefix(list)' };
       }
     }
   }
@@ -136,12 +136,12 @@ function extractEmbeddedCode(rawPhone, knownCode) {
     if (knownCode) {
       const c = knownCode.slice(1);
       if (digits.startsWith(c) && digits.length > c.length) {
-        return { code: knownCode, local: digits.slice(c.length).trim(), method: '00prefix(known)' };
+        return { code: knownCode, local: cleanLocal(digits.slice(c.length)), method: '00prefix(known)' };
       }
     }
     for (const c of KNOWN_CODES) {
       if (digits.startsWith(c) && digits.length > c.length) {
-        return { code: '+' + c, local: digits.slice(c.length).trim(), method: '00prefix(list)' };
+        return { code: '+' + c, local: cleanLocal(digits.slice(c.length)), method: '00prefix(list)' };
       }
     }
   }
@@ -153,11 +153,20 @@ function extractEmbeddedCode(rawPhone, knownCode) {
     const c = knownCode.slice(1);
     // Exige que quede al menos 5 dígitos de número local para evitar falsos positivos
     if (s.startsWith(c) && s.length > c.length + 4) {
-      return { code: knownCode, local: s.slice(c.length).trim(), method: 'bare(known)' };
+      return { code: knownCode, local: cleanLocal(s.slice(c.length)), method: 'bare(known)' };
     }
   }
 
   return null;
+}
+
+/**
+ * Limpia el resto del número local tras quitar el código de país,
+ * eliminando separadores sobrantes (espacios, guiones, puntos) que
+ * quedan pegados al inicio. Ej: '-3115702715' → '3115702715'.
+ */
+function cleanLocal(raw) {
+  return String(raw).trim().replace(/^[\s\-.]+/, '');
 }
 
 // ─── Migración principal ───────────────────────────────────────────────────────

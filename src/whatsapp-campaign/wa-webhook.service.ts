@@ -142,20 +142,20 @@ export class WaWebhookService {
   // ─── Click tracking ───────────────────────────────────────────────────────
 
   /**
-   * Registra un clic en el botón URL del mensaje de WhatsApp.
+   * Registra la llegada/clic del destinatario al link de WhatsApp.
    * El token es el deliveryId en base64url (mismo patrón que email tracking).
    */
-  async recordClick(token: string): Promise<string | null> {
+  async recordArrival(token: string): Promise<void> {
     let deliveryId: string;
     try {
       deliveryId = Buffer.from(token, 'base64url').toString('utf8');
-      if (!Types.ObjectId.isValid(deliveryId)) return null;
+      if (!Types.ObjectId.isValid(deliveryId)) return;
     } catch {
-      return null;
+      return;
     }
 
     const delivery = await this.deliveryModel.findById(deliveryId).lean();
-    if (!delivery) return null;
+    if (!delivery) return;
 
     const isFirstClick = (delivery.clickCount ?? 0) === 0;
 
@@ -169,11 +169,6 @@ export class WaWebhookService {
     await this.campaignModel.findByIdAndUpdate(delivery.campaignId, {
       $inc: campaignInc,
     });
-
-    // Reconstruir URL original: frontend_url + resolvedComponents['button.0.1']
-    // El tracking URL ya fue registrado, redirigimos al evento
-    const trackingUrl = delivery.resolvedComponents?.['button.0.1'] as string | undefined;
-    return trackingUrl ?? null;
   }
 
   private async markAttendeeOptedOut(attendeeId: string): Promise<void> {

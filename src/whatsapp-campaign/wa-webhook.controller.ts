@@ -51,14 +51,10 @@ export class WaWebhookController {
     return { ok: true };
   }
 
-  /** Redirect de clic en botón URL de WhatsApp */
-  @Get('track/click/:token')
-  async trackClick(@Param('token') token: string, @Res() res: Response) {
-    const redirectUrl = await this.webhookService.recordClick(token);
-    if (redirectUrl) {
-      res.redirect(302, redirectUrl);
-    } else {
-      res.status(404).send('Not found');
-    }
+  /** Confirmación de llegada al hacer clic en el link de WhatsApp (mismo patrón que el _tc de email) */
+  @Get('track/arrive/:token')
+  @HttpCode(204)
+  async trackArrival(@Param('token') token: string): Promise<void> {
+    await this.webhookService.recordArrival(token);
   }
 }
