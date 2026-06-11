@@ -319,7 +319,10 @@ export class WaCampaignService {
         return event.title ?? '';
       case 'event.startDate': {
         const date = event.schedule?.startsAt;
-        if (!date) return '';
+        // Meta rechaza templates con parámetros vacíos ("(#131008) Required
+        // parameter is missing") para TODOS los destinatarios, así que un
+        // evento sin fecha configurada no puede resolver a ''.
+        if (!date) return 'Por confirmar';
         return new Intl.DateTimeFormat('es', {
           dateStyle: 'long',
           timeStyle: 'short',
@@ -377,6 +380,21 @@ export class WaCampaignService {
     resolved: Record<string, string>,
   ): MetaMessageComponent[] {
     const result: MetaMessageComponent[] = [];
+
+    const headerComp = templateComponents.find((c) => c.type === 'HEADER');
+    if (headerComp && resolved['header.1'] !== undefined) {
+      if (headerComp.format === 'IMAGE') {
+        result.push({
+          type: 'header',
+          parameters: [{ type: 'image', image: { link: resolved['header.1'] } }],
+        });
+      } else {
+        result.push({
+          type: 'header',
+          parameters: [{ type: 'text', text: resolved['header.1'] }],
+        });
+      }
+    }
 
     const bodyComp = templateComponents.find((c) => c.type === 'BODY');
     if (bodyComp) {
