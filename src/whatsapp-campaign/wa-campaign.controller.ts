@@ -65,6 +65,12 @@ export class WaCampaignController {
     return this.templateService.syncStatus(id);
   }
 
+  @Post('templates/:id/sync-url')
+  @HttpCode(200)
+  syncTemplateUrl(@Param('id') id: string) {
+    return this.templateService.syncTemplateUrl(id);
+  }
+
   // ─── Campaigns ────────────────────────────────────────────────────────────
 
   @Get()

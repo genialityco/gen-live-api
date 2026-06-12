@@ -109,6 +109,31 @@ export class WaService {
   }
 
   /**
+   * Edita los componentes de un template ya existente en Meta (p.ej. para
+   * actualizar la URL base de un botón cuando cambia FRONTEND_URL).
+   * Meta vuelve a poner el template en revisión tras un edit.
+   */
+  async updateTemplate(metaTemplateId: string, components: WaTemplateComponent[]): Promise<void> {
+    const url = `${this.baseUrl}/${metaTemplateId}`;
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ components }),
+    });
+
+    const data = (await res.json()) as any;
+
+    if (!res.ok) {
+      const msg = data?.error?.message ?? `Meta API error ${res.status}`;
+      throw new Error(msg);
+    }
+  }
+
+  /**
    * Consulta el estado actual de un template en Meta.
    */
   async getTemplateStatus(metaTemplateId: string): Promise<string> {

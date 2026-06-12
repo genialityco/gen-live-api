@@ -82,6 +82,50 @@ export class WaTemplateService implements OnModuleInit {
     return template.toObject();
   }
 
+  /**
+   * Actualiza la URL base de los botones de tipo URL para que apunten al
+   * FRONTEND_URL configurado actualmente, tanto en Meta como en Mongo.
+   * Útil cuando el template se aprobó usando una URL de desarrollo
+   * (p.ej. http://localhost:5174) y debe apuntar al dominio público real.
+   */
+  async syncTemplateUrl(id: string): Promise<WaTemplate> {
+    const template = await this.templateModel.findById(id);
+    if (!template) throw new NotFoundException('Template no encontrado');
+    if (!template.metaTemplateId) {
+      throw new NotFoundException('Template sin ID de Meta (aún no enviado a revisión)');
+    }
+
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL');
+    if (!frontendUrl) {
+      throw new Error('FRONTEND_URL no está configurado');
+    }
+    if (/^https?:\/\/(localhost|127\.0\.0\.1)/i.test(frontendUrl)) {
+      throw new Error(
+        `FRONTEND_URL apunta a un dominio local (${frontendUrl}); Meta solo acepta URLs públicas en templates`,
+      );
+    }
+
+    const updatedComponents = template.components.map((comp) => {
+      if (comp.type !== 'BUTTONS' || !comp.buttons) return comp;
+      return {
+        ...comp,
+        buttons: comp.buttons.map((btn) => {
+          if (btn.type !== 'URL' || !btn.url) return btn;
+          return { ...btn, url: btn.url.replace(/^https?:\/\/[^/]+/, frontendUrl) };
+        }),
+      };
+    });
+
+    await this.waService.updateTemplate(template.metaTemplateId, updatedComponents);
+
+    template.components = updatedComponents;
+    const status = await this.waService.getTemplateStatus(template.metaTemplateId);
+    template.status = this.normalizeMetaStatus(status);
+    await template.save();
+
+    return template.toObject();
+  }
+
   /** Sincroniza el status con Meta (para polling manual o webhook) */
   async syncStatus(id: string): Promise<WaTemplate> {
     const template = await this.templateModel.findById(id);
