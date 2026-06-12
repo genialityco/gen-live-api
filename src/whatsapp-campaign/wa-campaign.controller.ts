@@ -53,6 +53,28 @@ export class WaCampaignController {
     return this.templateService.create(body, req.user.uid);
   }
 
+  @Patch('templates/:id')
+  updateTemplate(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      name: string;
+      displayName: string;
+      category: 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
+      language: string;
+      components: WaTemplateComponent[];
+      variableMappings: Record<string, string>;
+    },
+  ) {
+    return this.templateService.update(id, body);
+  }
+
+  @Delete('templates/:id')
+  @HttpCode(204)
+  deleteTemplate(@Param('id') id: string) {
+    return this.templateService.remove(id);
+  }
+
   @Post('templates/:id/submit')
   @HttpCode(200)
   submitTemplate(@Param('id') id: string) {

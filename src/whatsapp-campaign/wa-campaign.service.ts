@@ -331,6 +331,10 @@ export class WaCampaignService {
       }
       case 'event.slug':
         return event.slug ?? '';
+      case 'event.coverImageUrl':
+        // Si el evento no tiene portada, usar el logo de la organización
+        // para evitar que Meta rechace el envío por parámetro vacío.
+        return event.branding?.coverImageUrl ?? org.branding?.logoUrl ?? '';
       case 'org.slug':
         return org.domainSlug ?? '';
       case '_tracking_url': {

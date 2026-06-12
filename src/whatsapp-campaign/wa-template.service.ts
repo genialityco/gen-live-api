@@ -2,6 +2,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  BadRequestException,
   OnModuleInit,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -62,17 +63,53 @@ export class WaTemplateService implements OnModuleInit {
     return template.save();
   }
 
+  async update(
+    id: string,
+    dto: {
+      name: string;
+      displayName: string;
+      category: 'MARKETING' | 'UTILITY' | 'AUTHENTICATION';
+      language: string;
+      components: WaTemplateComponent[];
+      variableMappings: Record<string, string>;
+    },
+  ): Promise<WaTemplate> {
+    const template = await this.templateModel.findById(id);
+    if (!template) throw new NotFoundException('Template no encontrado');
+    if (template.status !== 'draft') {
+      throw new BadRequestException('Solo se pueden editar templates en borrador');
+    }
+
+    Object.assign(template, dto);
+    await template.save();
+    return template.toObject();
+  }
+
+  async remove(id: string): Promise<void> {
+    const template = await this.templateModel.findById(id);
+    if (!template) throw new NotFoundException('Template no encontrado');
+    if (template.isDefault) {
+      throw new BadRequestException('No se puede eliminar el template predeterminado');
+    }
+    if (template.status !== 'draft') {
+      throw new BadRequestException('Solo se pueden eliminar templates en borrador');
+    }
+    await this.templateModel.findByIdAndDelete(id);
+  }
+
   // ─── Submit a Meta para revisión ─────────────────────────────────────────
 
   async submitForReview(id: string): Promise<WaTemplate> {
     const template = await this.templateModel.findById(id);
     if (!template) throw new NotFoundException('Template no encontrado');
 
+    const components = await this.resolveImageHeaderExample(template.components);
+
     const result = await this.waService.submitTemplate({
       name: template.name,
       category: template.category,
       language: template.language,
-      components: template.components,
+      components,
     });
 
     template.metaTemplateId = result.metaTemplateId;
@@ -80,6 +117,29 @@ export class WaTemplateService implements OnModuleInit {
     await template.save();
 
     return template.toObject();
+  }
+
+  /**
+   * Si el template tiene un HEADER de tipo IMAGE con `exampleImageUrl`, sube
+   * esa imagen a Meta para obtener el `header_handle` que Meta exige como
+   * ejemplo al enviar el template a revisión. Devuelve los componentes listos
+   * para enviar a Meta (sin el campo interno `exampleImageUrl`).
+   */
+  private async resolveImageHeaderExample(
+    components: WaTemplateComponent[],
+  ): Promise<WaTemplateComponent[]> {
+    return Promise.all(
+      components.map(async (comp) => {
+        if (comp.type !== 'HEADER' || comp.format !== 'IMAGE' || !comp.exampleImageUrl) {
+          const { exampleImageUrl: _exampleImageUrl, ...rest } = comp;
+          return rest;
+        }
+
+        const handle = await this.waService.uploadMediaFromUrl(comp.exampleImageUrl);
+        const { exampleImageUrl: _exampleImageUrl, ...rest } = comp;
+        return { ...rest, example: { ...rest.example, header_handle: [handle] } };
+      }),
+    );
   }
 
   /**

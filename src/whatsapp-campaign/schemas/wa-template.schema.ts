@@ -16,7 +16,14 @@ export interface WaTemplateComponent {
     phone_number?: string;
     example?: string[];
   }>;
-  example?: { body_text?: string[][]; header_text?: string[] };
+  example?: { body_text?: string[][]; header_text?: string[]; header_handle?: string[] };
+  /**
+   * Solo para HEADER format IMAGE: URL pública de una imagen representativa,
+   * usada para generar el `example.header_handle` exigido por Meta al enviar
+   * el template a revisión. No se envía a Meta como tal (se sube y se
+   * reemplaza por el handle resultante).
+   */
+  exampleImageUrl?: string;
 }
 
 @Schema({ timestamps: true })
@@ -41,8 +48,9 @@ export class WaTemplate {
 
   /**
    * Mapeo de variables del template a fuentes de datos.
-   * Clave: "body.1", "body.2", "button.0.1"
-   * Valor: "attendee.name" | "event.title" | "event.startDate" | "_tracking_url"
+   * Clave: "body.1", "body.2", "button.0.1", "header.1"
+   * Valor: "attendee.name" | "event.title" | "event.startDate" |
+   *        "event.coverImageUrl" | "_tracking_url"
    */
   @Prop({ type: Object, default: {} })
   variableMappings: Record<string, string>;
