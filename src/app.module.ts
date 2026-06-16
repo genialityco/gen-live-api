@@ -18,12 +18,14 @@ import { LivekitModule } from './livekit/livekit.module';
 import { EventEmailModule } from './event-email/event-email.module';
 import { EmailCampaignModule } from './email-campaign/email-campaign.module';
 import { WaCampaignModule } from './whatsapp-campaign/wa-campaign.module';
+import { GeoipModule } from './geoip/geoip.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     MongooseModule.forRoot(process.env.MONGO_URI!),
     ThrottlerModule.forRoot([{ ttl: 60, limit: 9999 }]),
+    GeoipModule,
     AuthModule,
     RtdbModule,
     PeopleModule,

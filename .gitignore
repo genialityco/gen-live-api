@@ -61,3 +61,5 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # Archivos de reportes
 *.md
+# GeoIP database (auto-descargada desde MaxMind, no versionar)
+data/geoip/

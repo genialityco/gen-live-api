@@ -785,4 +785,101 @@ export class EmailCampaignService implements OnModuleInit {
   async getCampaignAnalytics(campaignId: string) {
     return this.trackService.getCampaignAnalytics(campaignId);
   }
+
+  /**
+   * Detecta el campo "país" del formulario de la org. Prioriza un campo cuyo
+   * `optionsSource` sea 'countries'; si no, uno cuyo id sugiera país.
+   */
+  private detectCountryField(org: any): any | null {
+    const fields: any[] = org?.registrationForm?.fields ?? [];
+    const bySource = fields.find((f) => f?.optionsSource === 'countries');
+    if (bySource) return bySource;
+    return (
+      fields.find(
+        (f) =>
+          typeof f?.id === 'string' &&
+          /^(pais|country)(_|$)/i.test(f.id) &&
+          f.type === 'select',
+      ) ?? null
+    );
+  }
+
+  /**
+   * Reporte de envíos agrupados por país DECLARADO en el formulario de registro.
+   * Devuelve los conteos por valor del campo país (ISO2 normalmente) usando las
+   * etiquetas del propio formulario cuando existen. Si la org no tiene campo país,
+   * `fieldId` es null y `byCountry` queda vacío.
+   */
+  async getCountryReport(campaignId: string): Promise<{
+    fieldId: string | null;
+    fieldLabel: string | null;
+    byCountry: Array<{ value: string; label: string | null; count: number }>;
+    unknown: number;
+    total: number;
+  }> {
+    if (!Types.ObjectId.isValid(campaignId)) {
+      throw new NotFoundException('Campaña no encontrada');
+    }
+    const campaign = await this.campaignModel.findById(campaignId).lean();
+    if (!campaign) throw new NotFoundException('Campaña no encontrada');
+
+    const org = await this.orgModel.findById(campaign.orgId).lean();
+    const field = this.detectCountryField(org);
+
+    const total = await this.deliveryModel.countDocuments({
+      campaignId: new Types.ObjectId(campaignId),
+    });
+
+    if (!field) {
+      return { fieldId: null, fieldLabel: null, byCountry: [], unknown: total, total };
+    }
+
+    const fieldId: string = field.id;
+    const labelMap = new Map<string, string>();
+    for (const opt of (field.options ?? []) as Array<{ value: string; label: string }>) {
+      if (opt?.value != null) labelMap.set(String(opt.value), opt.label);
+    }
+
+    const agg = await this.deliveryModel.aggregate([
+      { $match: { campaignId: new Types.ObjectId(campaignId) } },
+      {
+        $lookup: {
+          from: this.orgAttendeeModel.collection.name,
+          localField: 'attendeeId',
+          foreignField: '_id',
+          as: 'att',
+        },
+      },
+      { $unwind: { path: '$att', preserveNullAndEmptyArrays: true } },
+      {
+        $group: {
+          _id: { $ifNull: [`$att.registrationData.${fieldId}`, null] },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const byCountry: Array<{ value: string; label: string | null; count: number }> = [];
+    let unknown = 0;
+    for (const row of agg) {
+      const value = row._id;
+      if (value == null || value === '') {
+        unknown += row.count;
+      } else {
+        const v = String(value);
+        byCountry.push({ value: v, label: labelMap.get(v) ?? null, count: row.count });
+      }
+    }
+    byCountry.sort((a, b) => b.count - a.count);
+
+    return { fieldId, fieldLabel: field.label ?? fieldId, byCountry, unknown, total };
+  }
+
+  async getGeoAnalytics(campaignId: string) {
+    return this.trackService.getGeoAnalytics(campaignId);
+  }
+
+  async backfillGeo(campaignId: string) {
+    return this.trackService.backfillGeo(campaignId);
+  }
 }

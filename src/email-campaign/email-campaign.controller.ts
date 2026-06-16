@@ -46,6 +46,25 @@ export class EmailCampaignController {
     return this.campaignService.getCampaignAnalytics(campaignId);
   }
 
+  // Reporte de envíos por país DECLARADO en el formulario de registro
+  @Get(':campaignId/country-report')
+  async getCountryReport(@Param('campaignId') campaignId: string) {
+    return this.campaignService.getCountryReport(campaignId);
+  }
+
+  // Clics por país de ORIGEN (geolocalización de IP)
+  @Get(':campaignId/geo-analytics')
+  async getGeoAnalytics(@Param('campaignId') campaignId: string) {
+    return this.campaignService.getGeoAnalytics(campaignId);
+  }
+
+  // Re-resuelve el país de clics históricos sin geo (tras activar la geolocalización)
+  @Post(':campaignId/backfill-geo')
+  @HttpCode(200)
+  async backfillGeo(@Param('campaignId') campaignId: string) {
+    return this.campaignService.backfillGeo(campaignId);
+  }
+
   @Post(':campaignId/send')
   async sendCampaign(@Param('campaignId') campaignId: string) {
     return this.campaignService.sendCampaign(campaignId);

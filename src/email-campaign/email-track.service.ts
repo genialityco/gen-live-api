@@ -12,11 +12,17 @@ import {
   EmailDeliveryDocument,
 } from './schemas/email-delivery.schema';
 import { EmailCampaign } from './schemas/email-campaign.schema';
+import { GeoipService } from '../geoip/geoip.service';
 
 export interface CampaignAnalytics {
   totalClicks: number;
   uniqueClickers: number;
   byUtm: Record<string, Array<{ value: string; clicks: number; uniqueClickers: number }>>;
+}
+
+export interface GeoAnalytics {
+  byCountry: Array<{ country: string; clicks: number; uniqueClickers: number }>;
+  unknown: { clicks: number; uniqueClickers: number };
 }
 
 @Injectable()
@@ -32,6 +38,7 @@ export class EmailTrackService {
     @InjectModel(EmailCampaign.name)
     private readonly campaignModel: Model<any>,
     private readonly configService: ConfigService,
+    private readonly geoipService: GeoipService,
   ) {
     this.apiUrl =
       this.configService.get<string>('API_URL') ||
@@ -71,6 +78,7 @@ export class EmailTrackService {
     const now = new Date();
 
     const utms = delivery.resolvedUtms as unknown as Record<string, string> ?? {};
+    const geoCountry = this.geoipService.lookupCountry(ip)?.iso ?? null;
 
     await this.clickModel.create({
       campaignId: delivery.campaignId,
@@ -81,6 +89,7 @@ export class EmailTrackService {
       utms,
       userAgent: userAgent.slice(0, 500),
       ip,
+      geoCountry,
       isBot,
       clickedAt: now,
       arrivedAt: null,
@@ -197,5 +206,89 @@ export class EmailTrackService {
     }
 
     return { totalClicks, uniqueClickers, byUtm };
+  }
+
+  /**
+   * Clics agrupados por país de origen (geolocalización de la IP del clic).
+   * Excluye bots. Los clics sin país resuelto se agregan en `unknown`.
+   */
+  async getGeoAnalytics(campaignId: string): Promise<GeoAnalytics> {
+    if (!Types.ObjectId.isValid(campaignId)) {
+      throw new NotFoundException('Campaña no encontrada');
+    }
+    const campaignObjId = new Types.ObjectId(campaignId);
+
+    // Nivel 1: por (país, deliveryId) → clics de cada persona en cada país
+    // Nivel 2: por país → totalClicks y clickers únicos
+    const agg = await this.clickModel.aggregate([
+      { $match: { campaignId: campaignObjId, isBot: false } },
+      {
+        $group: {
+          _id: { country: '$geoCountry', deliveryId: '$deliveryId' },
+          clicksPerUser: { $sum: 1 },
+        },
+      },
+      {
+        $group: {
+          _id: '$_id.country',
+          uniqueClickers: { $sum: 1 },
+          clicks: { $sum: '$clicksPerUser' },
+        },
+      },
+    ]);
+
+    const byCountry: GeoAnalytics['byCountry'] = [];
+    const unknown = { clicks: 0, uniqueClickers: 0 };
+    for (const row of agg) {
+      const country = row._id as string | null;
+      if (!country) {
+        unknown.clicks += row.clicks;
+        unknown.uniqueClickers += row.uniqueClickers;
+      } else {
+        byCountry.push({
+          country,
+          clicks: row.clicks,
+          uniqueClickers: row.uniqueClickers,
+        });
+      }
+    }
+    byCountry.sort((a, b) => b.uniqueClickers - a.uniqueClickers);
+
+    return { byCountry, unknown };
+  }
+
+  /**
+   * Re-resuelve el país de los clics que aún no lo tienen (geoCountry null) a
+   * partir de la IP ya almacenada. Útil tras activar la geolocalización para
+   * enriquecer clics históricos. Devuelve cuántos se actualizaron.
+   */
+  async backfillGeo(campaignId: string): Promise<{ updated: number; pending: number }> {
+    if (!Types.ObjectId.isValid(campaignId)) {
+      throw new NotFoundException('Campaña no encontrada');
+    }
+    const campaignObjId = new Types.ObjectId(campaignId);
+
+    const pending = await this.clickModel
+      .find({
+        campaignId: campaignObjId,
+        geoCountry: null,
+        ip: { $nin: [null, ''] },
+      })
+      .select('_id ip')
+      .lean();
+
+    let updated = 0;
+    for (const click of pending) {
+      const iso = this.geoipService.lookupCountry((click as any).ip)?.iso ?? null;
+      if (iso) {
+        await this.clickModel.updateOne(
+          { _id: (click as any)._id },
+          { $set: { geoCountry: iso } },
+        );
+        updated++;
+      }
+    }
+
+    return { updated, pending: pending.length };
   }
 }

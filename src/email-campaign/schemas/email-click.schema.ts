@@ -42,6 +42,10 @@ export class EmailClick {
   @Prop({ default: '' })
   ip: string;
 
+  // País resuelto por geolocalización de IP (ISO-3166-1 alpha-2, ej: 'CO'). null si no se pudo determinar.
+  @Prop({ type: String, default: null })
+  geoCountry: string | null;
+
   @Prop({ default: false })
   isBot: boolean;
 
@@ -56,4 +60,5 @@ export type EmailClickDocument = HydratedDocument<EmailClick>;
 export const EmailClickSchema = SchemaFactory.createForClass(EmailClick);
 
 EmailClickSchema.index({ campaignId: 1, isBot: 1 });
+EmailClickSchema.index({ campaignId: 1, isBot: 1, geoCountry: 1 });
 EmailClickSchema.index({ deliveryId: 1 });
