@@ -4,6 +4,7 @@ import { Model, Types } from 'mongoose';
 import { WaDelivery, WaDeliveryDocument } from './schemas/wa-delivery.schema';
 import { WaCampaign } from './schemas/wa-campaign.schema';
 import { WaTemplateService } from './wa-template.service';
+import { GeoipService } from '../geoip/geoip.service';
 
 @Injectable()
 export class WaWebhookService {
@@ -15,6 +16,7 @@ export class WaWebhookService {
     @InjectModel(WaCampaign.name)
     private readonly campaignModel: Model<any>,
     private readonly templateService: WaTemplateService,
+    private readonly geoipService: GeoipService,
   ) {}
 
   /**
@@ -144,8 +146,11 @@ export class WaWebhookService {
   /**
    * Registra la llegada/clic del destinatario al link de WhatsApp.
    * El token es el deliveryId en base64url (mismo patrón que email tracking).
+   * A diferencia de email, el link de WhatsApp va directo a la página de destino
+   * (sin redirect), así que la IP del destinatario solo llega aquí: la usamos
+   * para geolocalizar el país de origen del clic.
    */
-  async recordArrival(token: string): Promise<void> {
+  async recordArrival(token: string, ip = ''): Promise<void> {
     let deliveryId: string;
     try {
       deliveryId = Buffer.from(token, 'base64url').toString('utf8');
@@ -159,9 +164,19 @@ export class WaWebhookService {
 
     const isFirstClick = (delivery.clickCount ?? 0) === 0;
 
+    const set: Record<string, any> = {};
+    if (isFirstClick) set.firstClickAt = new Date();
+    // Resuelve el país solo si aún no lo tenemos (primer clic con IP válida);
+    // guarda también la IP para poder hacer backfill si la geo se activa luego.
+    if (ip && !delivery.geoCountry) {
+      set.clickIp = ip;
+      const iso = this.geoipService.lookupCountry(ip)?.iso ?? null;
+      if (iso) set.geoCountry = iso;
+    }
+
     await this.deliveryModel.findByIdAndUpdate(deliveryId, {
       $inc: { clickCount: 1 },
-      ...(isFirstClick ? { $set: { firstClickAt: new Date() } } : {}),
+      ...(Object.keys(set).length > 0 ? { $set: set } : {}),
     });
 
     const campaignInc: Record<string, number> = { 'stats.totalClicks': 1 };

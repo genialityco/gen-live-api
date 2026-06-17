@@ -54,11 +54,20 @@ export class WaDelivery {
   @Prop({ type: Date, default: null }) readAt: Date | null;
   @Prop({ default: 0 }) clickCount: number;
   @Prop({ type: Date, default: null }) firstClickAt: Date | null;
+
+  /** IP del destinatario en su primer clic (para geolocalización / backfill). */
+  @Prop({ type: String, default: null })
+  clickIp: string | null;
+
+  /** País resuelto por geolocalización de IP del clic (ISO-3166-1 alpha-2, ej: 'CO'). null si no se pudo determinar. */
+  @Prop({ type: String, default: null })
+  geoCountry: string | null;
 }
 
 export type WaDeliveryDocument = HydratedDocument<WaDelivery>;
 export const WaDeliverySchema = SchemaFactory.createForClass(WaDelivery);
 
 WaDeliverySchema.index({ campaignId: 1, status: 1 });
+WaDeliverySchema.index({ campaignId: 1, geoCountry: 1 });
 WaDeliverySchema.index({ waMessageId: 1 }, { sparse: true });
 WaDeliverySchema.index({ attendeeId: 1 });

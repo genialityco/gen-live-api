@@ -5,12 +5,13 @@ import {
   Query,
   Body,
   Param,
+  Req,
   Res,
   HttpCode,
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { WaWebhookService } from './wa-webhook.service';
 
 @Controller('wa')
@@ -54,7 +55,14 @@ export class WaWebhookController {
   /** Confirmación de llegada al hacer clic en el link de WhatsApp (mismo patrón que el _tc de email) */
   @Get('track/arrive/:token')
   @HttpCode(204)
-  async trackArrival(@Param('token') token: string): Promise<void> {
-    await this.webhookService.recordArrival(token);
+  async trackArrival(
+    @Param('token') token: string,
+    @Req() req: Request,
+  ): Promise<void> {
+    const ip =
+      (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() ||
+      req.socket.remoteAddress ||
+      '';
+    await this.webhookService.recordArrival(token, ip);
   }
 }

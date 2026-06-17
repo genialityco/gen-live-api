@@ -10,6 +10,7 @@ import { WaCampaign, WaCampaignDocument, WaUtmParam } from './schemas/wa-campaig
 import { WaDelivery, WaDeliveryDocument } from './schemas/wa-delivery.schema';
 import { WaTemplate, WaTemplateDocument, WaTemplateComponent } from './schemas/wa-template.schema';
 import { WaService, MetaMessageComponent } from './wa.service';
+import { GeoipService } from '../geoip/geoip.service';
 
 const BATCH_SIZE = 20; // Meta Cloud API: cómodo bien por debajo del límite de 80/s
 
@@ -17,6 +18,19 @@ export interface WaCampaignAnalytics {
   totalClicks: number;
   uniqueClickers: number;
   byUtm: Record<string, Array<{ value: string; clicks: number; uniqueClickers: number }>>;
+}
+
+export interface WaCountryReport {
+  fieldId: string | null;
+  fieldLabel: string | null;
+  byCountry: Array<{ value: string; label: string | null; count: number }>;
+  unknown: number;
+  total: number;
+}
+
+export interface WaGeoAnalytics {
+  byCountry: Array<{ country: string; clicks: number; uniqueClickers: number }>;
+  unknown: { clicks: number; uniqueClickers: number };
 }
 
 @Injectable()
@@ -37,6 +51,7 @@ export class WaCampaignService {
     @InjectModel('Organization')
     private readonly orgModel: Model<any>,
     private readonly waService: WaService,
+    private readonly geoipService: GeoipService,
   ) {}
 
   // ─── CRUD ─────────────────────────────────────────────────────────────────
@@ -613,5 +628,167 @@ export class WaCampaignService {
     }
 
     return { totalClicks, uniqueClickers, byUtm };
+  }
+
+  // ─── País declarado en el formulario de registro ──────────────────────────
+
+  /**
+   * Detecta el campo "país" del formulario de la org. Prioriza un campo cuyo
+   * `optionsSource` sea 'countries'; si no, uno cuyo id sugiera país.
+   */
+  private detectCountryField(org: any): any | null {
+    const fields: any[] = org?.registrationForm?.fields ?? [];
+    const bySource = fields.find((f) => f?.optionsSource === 'countries');
+    if (bySource) return bySource;
+    return (
+      fields.find(
+        (f) =>
+          typeof f?.id === 'string' &&
+          /^(pais|country)(_|$)/i.test(f.id) &&
+          f.type === 'select',
+      ) ?? null
+    );
+  }
+
+  /**
+   * Reporte de envíos agrupados por país DECLARADO en el formulario de registro.
+   * Mismo criterio que email: usa las etiquetas del propio formulario cuando
+   * existen. Si la org no tiene campo país, `fieldId` es null.
+   */
+  async getCountryReport(campaignId: string): Promise<WaCountryReport> {
+    if (!Types.ObjectId.isValid(campaignId)) {
+      throw new NotFoundException('Campaña no encontrada');
+    }
+    const campaign = await this.campaignModel.findById(campaignId).lean();
+    if (!campaign) throw new NotFoundException('Campaña no encontrada');
+
+    const org = await this.orgModel.findById(campaign.orgId).lean();
+    const field = this.detectCountryField(org);
+
+    const campaignObjId = new Types.ObjectId(campaignId);
+    const total = await this.deliveryModel.countDocuments({ campaignId: campaignObjId });
+
+    if (!field) {
+      return { fieldId: null, fieldLabel: null, byCountry: [], unknown: total, total };
+    }
+
+    const fieldId: string = field.id;
+    const labelMap = new Map<string, string>();
+    for (const opt of (field.options ?? []) as Array<{ value: string; label: string }>) {
+      if (opt?.value != null) labelMap.set(String(opt.value), opt.label);
+    }
+
+    const agg = await this.deliveryModel.aggregate([
+      { $match: { campaignId: campaignObjId } },
+      {
+        $lookup: {
+          from: this.attendeeModel.collection.name,
+          localField: 'attendeeId',
+          foreignField: '_id',
+          as: 'att',
+        },
+      },
+      { $unwind: { path: '$att', preserveNullAndEmptyArrays: true } },
+      {
+        $group: {
+          _id: { $ifNull: [`$att.registrationData.${fieldId}`, null] },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const byCountry: WaCountryReport['byCountry'] = [];
+    let unknown = 0;
+    for (const row of agg) {
+      const value = row._id;
+      if (value == null || value === '') {
+        unknown += row.count;
+      } else {
+        const v = String(value);
+        byCountry.push({ value: v, label: labelMap.get(v) ?? null, count: row.count });
+      }
+    }
+    byCountry.sort((a, b) => b.count - a.count);
+
+    return { fieldId, fieldLabel: field.label ?? fieldId, byCountry, unknown, total };
+  }
+
+  // ─── País por geolocalización de IP del clic ──────────────────────────────
+
+  /**
+   * Clics agrupados por país de origen (geolocalización de la IP del clic).
+   * En WhatsApp cada delivery es un destinatario, así que el país vive en el
+   * propio delivery (`geoCountry`). Los clics sin país resuelto van a `unknown`.
+   */
+  async getGeoAnalytics(campaignId: string): Promise<WaGeoAnalytics> {
+    if (!Types.ObjectId.isValid(campaignId)) {
+      throw new NotFoundException('Campaña no encontrada');
+    }
+    const campaignObjId = new Types.ObjectId(campaignId);
+
+    const agg = await this.deliveryModel.aggregate([
+      { $match: { campaignId: campaignObjId, clickCount: { $gt: 0 } } },
+      {
+        $group: {
+          _id: '$geoCountry',
+          uniqueClickers: { $sum: 1 },
+          clicks: { $sum: '$clickCount' },
+        },
+      },
+    ]);
+
+    const byCountry: WaGeoAnalytics['byCountry'] = [];
+    const unknown = { clicks: 0, uniqueClickers: 0 };
+    for (const row of agg) {
+      const country = row._id as string | null;
+      if (!country) {
+        unknown.clicks += row.clicks;
+        unknown.uniqueClickers += row.uniqueClickers;
+      } else {
+        byCountry.push({
+          country,
+          clicks: row.clicks,
+          uniqueClickers: row.uniqueClickers,
+        });
+      }
+    }
+    byCountry.sort((a, b) => b.uniqueClickers - a.uniqueClickers);
+
+    return { byCountry, unknown };
+  }
+
+  /**
+   * Re-resuelve el país de los deliveries que ya tienen clic e IP pero aún no
+   * tienen `geoCountry`. Útil tras activar la geolocalización. Devuelve cuántos
+   * se actualizaron.
+   */
+  async backfillGeo(campaignId: string): Promise<{ updated: number; pending: number }> {
+    if (!Types.ObjectId.isValid(campaignId)) {
+      throw new NotFoundException('Campaña no encontrada');
+    }
+    const campaignObjId = new Types.ObjectId(campaignId);
+
+    const pending = await this.deliveryModel
+      .find({
+        campaignId: campaignObjId,
+        geoCountry: null,
+        clickIp: { $nin: [null, ''] },
+      })
+      .select('_id clickIp')
+      .lean();
+
+    let updated = 0;
+    for (const d of pending) {
+      const iso = this.geoipService.lookupCountry((d as any).clickIp)?.iso ?? null;
+      if (iso) {
+        await this.deliveryModel.updateOne(
+          { _id: (d as any)._id },
+          { $set: { geoCountry: iso } },
+        );
+        updated++;
+      }
+    }
+
+    return { updated, pending: pending.length };
   }
 }

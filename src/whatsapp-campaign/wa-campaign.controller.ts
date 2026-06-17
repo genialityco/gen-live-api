@@ -170,4 +170,23 @@ export class WaCampaignController {
   getAnalytics(@Param('id') id: string) {
     return this.campaignService.getCampaignAnalytics(id);
   }
+
+  // Reporte de envíos por país DECLARADO en el formulario de registro
+  @Get(':id/country-report')
+  getCountryReport(@Param('id') id: string) {
+    return this.campaignService.getCountryReport(id);
+  }
+
+  // Clics por país de ORIGEN (geolocalización de IP)
+  @Get(':id/geo-analytics')
+  getGeoAnalytics(@Param('id') id: string) {
+    return this.campaignService.getGeoAnalytics(id);
+  }
+
+  // Re-resuelve el país de clics históricos sin geo (tras activar la geolocalización)
+  @Post(':id/backfill-geo')
+  @HttpCode(200)
+  backfillGeo(@Param('id') id: string) {
+    return this.campaignService.backfillGeo(id);
+  }
 }
