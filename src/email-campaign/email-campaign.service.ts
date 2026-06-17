@@ -353,9 +353,10 @@ export class EmailCampaignService implements OnModuleInit {
 
     const summary = orgName ? `${orgName}: ${event.title}` : event.title;
 
-    const descriptionParts: string[] = [];
+    // El enlace va PRIMERO: las vistas previas de invitación (Gmail/Outlook)
+    // suelen truncar la descripción, así garantizamos que el enlace sea visible.
+    const descriptionParts: string[] = [`Accede al evento: ${attendUrlWithUtm}`];
     if (event.description) descriptionParts.push(event.description);
-    descriptionParts.push(`Accede al evento: ${attendUrlWithUtm}`);
 
     const lines = [
       'BEGIN:VCALENDAR',

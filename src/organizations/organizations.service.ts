@@ -1,6 +1,6 @@
 import { Injectable, Inject, forwardRef } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import {
   Organization,
   OrganizationDocument,
@@ -8,6 +8,25 @@ import {
 import { OrgAttendee } from './schemas/org-attendee.schema';
 import { CreateOrgAttendeeDto } from './dtos/create-org-attendee.dto';
 import { EventsService } from '../events/events.service';
+
+export interface OrgWithNextEvent {
+  _id: Types.ObjectId;
+  name: string;
+  domainSlug: string;
+  ownerUid: string;
+  description?: string;
+  branding?: Record<string, unknown>;
+  registrationForm?: Record<string, unknown>;
+  createdAt?: Date;
+  updatedAt?: Date;
+  nextEvent: {
+    _id: Types.ObjectId;
+    slug: string;
+    title: string;
+    status: string;
+    startsAt: Date;
+  } | null;
+}
 
 @Injectable()
 export class OrganizationsService {
@@ -31,8 +50,22 @@ export class OrganizationsService {
     return this.model.create({ ...dto, domainSlug, ownerUid });
   }
 
-  async listByOwnerUid(ownerUid: string) {
-    return this.model.find({ ownerUid }).sort({ createdAt: -1 }).lean();
+  async listByOwnerUid(ownerUid: string): Promise<OrgWithNextEvent[]> {
+    const orgs = await this.model
+      .find({ ownerUid })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const orgIds = orgs.map((o) => o._id as Types.ObjectId);
+    const nextMap = await this.eventsService.nextUpcomingByOrgIds(orgIds);
+
+    return orgs.map(
+      (o) =>
+        ({
+          ...o,
+          nextEvent: nextMap[(o._id as Types.ObjectId).toString()] ?? null,
+        }) as unknown as OrgWithNextEvent,
+    );
   }
 
   async findById(id: string) {

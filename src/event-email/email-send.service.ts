@@ -163,9 +163,10 @@ export class EmailSendService {
     const attendUrl = `${frontendUrl}/org/${orgSlug}/event/${event.slug}/attend`;
     const summary = orgName ? `${orgName}: ${event.title}` : event.title;
 
-    const descriptionParts: string[] = [];
+    // El enlace va PRIMERO: las vistas previas de invitación (Gmail/Outlook)
+    // suelen truncar la descripción, así garantizamos que el enlace sea visible.
+    const descriptionParts: string[] = [`Accede al evento: ${attendUrl}`];
     if (event.description) descriptionParts.push(event.description);
-    descriptionParts.push(`Accede al evento: ${attendUrl}`);
 
     const lines = [
       'BEGIN:VCALENDAR',

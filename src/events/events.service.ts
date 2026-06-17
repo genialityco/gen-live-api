@@ -309,6 +309,61 @@ export class EventsService implements OnModuleInit {
     }
   }
 
+  /**
+   * Próximo evento (el de `schedule.startsAt` más cercano en el futuro, no oculto)
+   * para un conjunto de organizaciones, resuelto en una sola consulta.
+   * Devuelve un mapa orgId(string) → datos mínimos del evento.
+   */
+  async nextUpcomingByOrgIds(
+    orgIds: Types.ObjectId[],
+  ): Promise<
+    Record<
+      string,
+      {
+        _id: Types.ObjectId;
+        slug: string;
+        title: string;
+        status: string;
+        startsAt: Date;
+      }
+    >
+  > {
+    if (!orgIds.length) return {};
+    const now = new Date();
+    const rows = await this.model.aggregate([
+      {
+        $match: {
+          orgId: { $in: orgIds },
+          hidden: { $ne: true },
+          'schedule.startsAt': { $gte: now },
+        },
+      },
+      { $sort: { 'schedule.startsAt': 1 } },
+      {
+        $group: {
+          _id: '$orgId',
+          eventId: { $first: '$_id' },
+          slug: { $first: '$slug' },
+          title: { $first: '$title' },
+          status: { $first: '$status' },
+          startsAt: { $first: '$schedule.startsAt' },
+        },
+      },
+    ]);
+
+    const map: Record<string, any> = {};
+    for (const r of rows) {
+      map[r._id.toString()] = {
+        _id: r.eventId,
+        slug: r.slug,
+        title: r.title,
+        status: r.status,
+        startsAt: r.startsAt,
+      };
+    }
+    return map;
+  }
+
   async listByOrgIdPublic(orgId: string) {
     try {
       const objectId = new Types.ObjectId(orgId);
