@@ -437,7 +437,52 @@ export class EventsService implements OnModuleInit {
       )
       .lean();
     if (!ev) throw new NotFoundException('Event not found');
+
+    // Sync evento→estudio: mantener el `playbackHlsUrl` del estudio en sincronía
+    // con la URL de transmisión configurada en el control del evento.
+    // Solo en upcoming/live: en ended/replay, `event.stream.url` apunta al
+    // VOD/replay (Mux usa un playbackId distinto) y NO debe pisar la URL de vivo.
+    if (ev.slug && (ev.status === 'upcoming' || ev.status === 'live')) {
+      try {
+        await this.liveConfigService.update(ev.slug, {
+          playbackHlsUrl: payload.url,
+          provider: payload.provider as any,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `No se pudo sincronizar playbackHlsUrl para ${ev.slug}: ${String(err)}`,
+        );
+      }
+    }
+
     return { ok: true, eventId, stream: ev.stream };
+  }
+
+  /**
+   * Sync estudio→evento: cuando el estudio guarda el `playbackHlsUrl`, reflejarlo
+   * en `event.stream` para que el endpoint público y el resto de consumidores
+   * queden coherentes.
+   * Respeta la fase: el filtro de status garantiza que solo se actualiza en
+   * upcoming/live, así no se pisa la URL de repetición (replay/ended).
+   */
+  async syncStreamFromStudio(
+    eventSlug: string,
+    payload: { url: string; provider: 'vimeo' | 'mux' | 'gcore' },
+  ) {
+    if (!eventSlug || !payload.url) return null;
+    const ev = await this.model
+      .findOneAndUpdate(
+        { slug: eventSlug, status: { $in: ['upcoming', 'live'] } },
+        {
+          $set: {
+            'stream.provider': payload.provider,
+            'stream.url': payload.url,
+          },
+        },
+        { new: true },
+      )
+      .lean();
+    return ev ?? null;
   }
 
   /**

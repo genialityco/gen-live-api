@@ -17,12 +17,14 @@ import {
   UseInterceptors,
   Delete,
   Patch,
+  forwardRef,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { IsIn, IsOptional, IsString } from 'class-validator';
 import { LivekitService } from './livekit.service';
 import { LiveConfigService } from './live-config.service';
 import { MuxService } from './mux.service';
+import { EventsService } from '../events/events.service';
 import { FirebaseAuthGuard } from 'src/common/guards/firebase-auth.guard';
 import * as admin from 'firebase-admin';
 
@@ -58,6 +60,8 @@ export class LivekitController {
     private readonly muxService: MuxService,
     @Inject('RTDB') private readonly rtdb: admin.database.Database,
     @Inject('FIREBASE_ADMIN') private readonly firebaseAdmin: typeof admin,
+    @Inject(forwardRef(() => EventsService))
+    private readonly eventsService: EventsService,
   ) {}
 
   @Post('rooms/ensure')
@@ -169,6 +173,27 @@ export class LivekitController {
     if (typeof body.frameUrl === 'string') patch.frameUrl = body.frameUrl;
 
     const saved = await this.liveConfig.update(body.eventSlug, patch);
+
+    // Sync estudio→evento: reflejar el playbackHlsUrl en event.stream para que el
+    // endpoint público y los consumidores queden coherentes. syncStreamFromStudio
+    // respeta la fase (solo upcoming/live) para no pisar la URL de replay.
+    if (allowSecrets && typeof patch.playbackHlsUrl === 'string' && patch.playbackHlsUrl) {
+      const url: string = patch.playbackHlsUrl;
+      const provider: 'vimeo' | 'mux' | 'gcore' = /vimeo\.com/i.test(url)
+        ? 'vimeo'
+        : /gvideo\.(co|io)/i.test(url)
+          ? 'gcore'
+          : 'mux';
+      try {
+        await this.eventsService.syncStreamFromStudio(body.eventSlug, {
+          url,
+          provider,
+        });
+      } catch {
+        // No bloquear el guardado de config si el sync al evento falla
+      }
+    }
+
     return { ok: true, id: saved._id, allowSecrets };
   }
 
