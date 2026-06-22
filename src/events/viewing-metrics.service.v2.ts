@@ -464,6 +464,58 @@ export class ViewingMetricsService {
   }
 
   /**
+   * Espectadores concurrentes AHORA, leídos directamente desde la presencia en
+   * RTDB (fuente compartida entre instancias) y deduplicados por EventUser.
+   *
+   * A diferencia de leer `EventMetrics.currentConcurrentViewers` (que lo escribe
+   * solo la instancia que tiene el watcher en memoria), esto funciona con
+   * auto-escalado / múltiples instancias y se autocorrige: los nodos de presencia
+   * obsoletos se filtran por su timestamp, así que un evento sin audiencia da 0
+   * aunque ningún watcher esté activo en esta instancia.
+   */
+  async getConcurrentViewersFromPresence(eventId: string): Promise<number> {
+    // Ventana de frescura: heartbeat del frontend es 15s; toleramos algunas
+    // pérdidas/latencia antes de considerar a alguien desconectado.
+    const PRESENCE_FRESH_MS = 45_000;
+
+    let val: any;
+    try {
+      const snap = await Promise.race([
+        this.rtdbService.ref(`/presence/${eventId}`).once('value'),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('RTDB timeout')), 4000),
+        ),
+      ]);
+      val = (snap as any).val() ?? {};
+    } catch (e) {
+      this.logger.warn(
+        `getConcurrentViewersFromPresence: RTDB read failed for ${eventId}: ${(e as Error).message}`,
+      );
+      return 0;
+    }
+
+    if (!val || typeof val !== 'object') return 0;
+
+    const now = Date.now();
+    const freshUIDs: string[] = [];
+    for (const [uid, data] of Object.entries(val)) {
+      const on: boolean = (data as any)?.on ?? false;
+      const ts: number = (data as any)?.ts ?? 0;
+      if (on && now - ts < PRESENCE_FRESH_MS) freshUIDs.push(uid);
+    }
+
+    if (freshUIDs.length === 0) return 0;
+
+    // Consolidar por EventUser (consistente con el resto de métricas únicas)
+    const eventUsers = await this.eventUserModel
+      .find({ eventId, firebaseUID: { $in: freshUIDs } }, { _id: 1 })
+      .lean()
+      .exec();
+
+    return new Set(eventUsers.map((eu) => eu._id.toString())).size;
+  }
+
+  /**
    * Obtener métricas actuales
    */
   async getEventMetrics(eventId: string) {

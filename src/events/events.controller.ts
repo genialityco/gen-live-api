@@ -34,7 +34,6 @@ import { UpdateRegistrationDto } from './dtos/update-registration.dto';
 import { StorageService } from '../organizations/storage.service';
 import { EmailCampaignService } from '../email-campaign/email-campaign.service';
 import { WaCampaignService } from '../whatsapp-campaign/wa-campaign.service';
-import { RtdbPresenceWatcherService } from '../rtdb/rtdb-presence-watcher.service';
 
 @Controller('events')
 export class EventsController {
@@ -44,7 +43,6 @@ export class EventsController {
     private metricsService: ViewingMetricsService,
     private emailCampaigns: EmailCampaignService,
     private waCampaigns: WaCampaignService,
-    private watcher: RtdbPresenceWatcherService,
   ) {}
 
   // ENDPOINTS PÚBLICOS (sin autenticación)
@@ -323,6 +321,20 @@ export class EventsController {
   }
 
   /**
+   * Espectadores concurrentes AHORA, calculados desde la presencia real en RTDB
+   * (fuente compartida entre instancias, autocorregida por timestamp). Robusto
+   * ante auto-escalado: no depende de qué instancia tenga el watcher en memoria.
+   */
+  @Get(':eventId/concurrent-now')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async getConcurrentNow(@Param('eventId') eventId: string) {
+    return {
+      currentConcurrentViewers:
+        await this.metricsService.getConcurrentViewersFromPresence(eventId),
+    };
+  }
+
+  /**
    * Informe global del evento: unifica las métricas de campañas de email y
    * WhatsApp con el engagement / tiempo de visualización de los asistentes.
    * Yuxtaposición (sin atribución canal→asistente).
@@ -333,12 +345,14 @@ export class EventsController {
     const event = await this.svc.findById(eventId);
     const orgId = String(event.orgId);
 
-    const [emailCampaigns, waCampaigns, viewing, metrics] = await Promise.all([
-      this.emailCampaigns.listCampaigns(orgId, eventId),
-      this.waCampaigns.findAll(orgId, eventId),
-      this.metricsService.getEventWatchStats(eventId),
-      this.metricsService.getEventMetrics(eventId),
-    ]);
+    const [emailCampaigns, waCampaigns, viewing, metrics, concurrentNow] =
+      await Promise.all([
+        this.emailCampaigns.listCampaigns(orgId, eventId),
+        this.waCampaigns.findAll(orgId, eventId),
+        this.metricsService.getEventWatchStats(eventId),
+        this.metricsService.getEventMetrics(eventId),
+        this.metricsService.getConcurrentViewersFromPresence(eventId),
+      ]);
 
     const sumEmail = (key: string) =>
       emailCampaigns.reduce(
@@ -391,12 +405,10 @@ export class EventsController {
         })),
       },
       viewing: {
-        // "viendo ahora" solo es real si hay un watcher de presencia activo.
-        // Sin watcher (evento terminado, o diferido inactivo) el valor de Mongo
-        // puede estar pegado en el último conteo → lo forzamos a 0.
-        currentConcurrentViewers: this.watcher.isWatching(eventId)
-          ? (metrics?.currentConcurrentViewers ?? 0)
-          : 0,
+        // "viendo ahora" calculado desde la presencia real en RTDB (compartida
+        // entre instancias y autocorregida por timestamp), NO desde el valor de
+        // Mongo que escribe solo la instancia con el watcher en memoria.
+        currentConcurrentViewers: concurrentNow,
         peakConcurrentViewers: metrics?.peakConcurrentViewers ?? 0,
         totalUniqueViewers: metrics?.totalUniqueViewers ?? 0,
         ...viewing,
