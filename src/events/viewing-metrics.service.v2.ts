@@ -79,25 +79,32 @@ export class ViewingMetricsService {
   private async _persistMetrics(
     eventId: string,
     uniqueEventUserIds: Set<string>,
+    isLive = true,
   ): Promise<{ currentConcurrent: number; uniqueEventUsers: number }> {
     const currentConcurrent = uniqueEventUserIds.size;
 
+    // El pico concurrente representa la audiencia EN VIVO. El público del diferido
+    // (isLive=false) actualiza el concurrente actual pero NO debe inflar el peak.
+    const update: any = {
+      $set: {
+        currentConcurrentViewers: currentConcurrent,
+        lastUpdate: new Date(),
+      },
+      // $setOnInsert solo se aplica cuando se crea el documento (upsert)
+      $setOnInsert: { totalUniqueViewers: 0 },
+    };
+    if (isLive) {
+      // $max actualiza peakConcurrentViewers solo si currentConcurrent es mayor
+      update.$max = { peakConcurrentViewers: currentConcurrent };
+    } else {
+      // Doc creado durante el diferido: inicializa el peak en 0, no en la
+      // concurrencia del replay.
+      update.$setOnInsert.peakConcurrentViewers = 0;
+    }
+
     // Upsert atómico: evita contención sobre el mismo doc (WiredTiger hot doc)
     const metrics = await this.eventMetricsModel
-      .findOneAndUpdate(
-        { eventId },
-        {
-          $set: {
-            currentConcurrentViewers: currentConcurrent,
-            lastUpdate: new Date(),
-          },
-          // $max actualiza peakConcurrentViewers solo si currentConcurrent es mayor
-          $max: { peakConcurrentViewers: currentConcurrent },
-          // $setOnInsert solo se aplica cuando se crea el documento (upsert)
-          $setOnInsert: { totalUniqueViewers: 0 },
-        },
-        { upsert: true, new: true },
-      )
+      .findOneAndUpdate({ eventId }, update, { upsert: true, new: true })
       .lean()
       .exec();
 
@@ -165,7 +172,7 @@ export class ViewingMetricsService {
 
     if (initialActiveUIDs.length === 0) {
       // Todos los usuarios se fueron — resetear contador a 0
-      await this._persistMetrics(eventId, new Set());
+      await this._persistMetrics(eventId, new Set(), isLive);
       return;
     }
 
@@ -236,7 +243,7 @@ export class ViewingMetricsService {
 
     if (registeredUIDs.length === 0) {
       // No hay usuarios registrados — persistir 0 concurrentes sin query adicional
-      await this._persistMetrics(eventId, new Set());
+      await this._persistMetrics(eventId, new Set(), isLive);
       return;
     }
 
@@ -338,7 +345,7 @@ export class ViewingMetricsService {
       registeredUIDs.map((uid) => eventUserMap.get(uid)!._id.toString()),
     );
 
-    await this._persistMetrics(eventId, activeEventUserIds);
+    await this._persistMetrics(eventId, activeEventUserIds, isLive);
   }
 
   /**
@@ -540,6 +547,103 @@ export class ViewingMetricsService {
         totalWatchTimeSeconds: s.totalWatchTimeSeconds,
         liveWatchTimeSeconds: s.liveWatchTimeSeconds,
       })),
+    };
+  }
+
+  /**
+   * Estadísticas de engagement / tiempo de visualización AGREGADAS por evento.
+   *
+   * Consolida por EventUser (un mismo espectador con varios dispositivos/pestañas
+   * cuenta una sola vez) y devuelve promedios listos para el informe global:
+   *  - avgWatchTimeSeconds:     promedio de tiempo total visto por espectador único
+   *  - avgLiveWatchTimeSeconds: promedio de tiempo EN VIVO, solo entre quienes
+   *                             estuvieron presentes durante el live
+   *  - totalWatchTimeSeconds:   suma global (todas las sesiones)
+   *  - uniqueViewers / liveViewers / totalSessions
+   */
+  async getEventWatchStats(eventId: string): Promise<{
+    uniqueViewers: number;
+    liveViewers: number;
+    replayViewers: number;
+    totalSessions: number;
+    totalWatchTimeSeconds: number;
+    totalLiveWatchTimeSeconds: number;
+    totalReplayWatchTimeSeconds: number;
+    avgWatchTimeSeconds: number;
+    avgLiveWatchTimeSeconds: number;
+    avgReplayWatchTimeSeconds: number;
+  }> {
+    const [agg] = await this.viewingSessionModel.aggregate([
+      { $match: { eventId } },
+      // Nivel 1: consolidar por espectador único (EventUser)
+      {
+        $group: {
+          _id: '$eventUserId',
+          totalWatch: { $sum: '$totalWatchTimeSeconds' },
+          liveWatch: { $sum: '$liveWatchTimeSeconds' },
+          sessions: { $sum: 1 },
+          wasLive: { $max: { $cond: ['$wasLiveDuringSession', 1, 0] } },
+        },
+      },
+      // El tiempo en diferido es lo visto fuera del live: total − live (nunca < 0)
+      {
+        $project: {
+          totalWatch: 1,
+          liveWatch: 1,
+          sessions: 1,
+          wasLive: 1,
+          replayWatch: {
+            $max: [{ $subtract: ['$totalWatch', '$liveWatch'] }, 0],
+          },
+        },
+      },
+      // Nivel 2: agregados globales del evento
+      {
+        $group: {
+          _id: null,
+          uniqueViewers: { $sum: 1 },
+          liveViewers: { $sum: '$wasLive' },
+          replayViewers: {
+            $sum: { $cond: [{ $gt: ['$replayWatch', 0] }, 1, 0] },
+          },
+          totalSessions: { $sum: '$sessions' },
+          totalWatchTimeSeconds: { $sum: '$totalWatch' },
+          totalLiveWatchTimeSeconds: { $sum: '$liveWatch' },
+          totalReplayWatchTimeSeconds: { $sum: '$replayWatch' },
+          // suma del tiempo live solo de quienes estuvieron en vivo, para promediar bien
+          liveWatchOfLiveViewers: {
+            $sum: { $cond: [{ $eq: ['$wasLive', 1] }, '$liveWatch', 0] },
+          },
+        },
+      },
+    ]);
+
+    const uniqueViewers: number = agg?.uniqueViewers ?? 0;
+    const liveViewers: number = agg?.liveViewers ?? 0;
+    const replayViewers: number = agg?.replayViewers ?? 0;
+    const totalWatchTimeSeconds: number = agg?.totalWatchTimeSeconds ?? 0;
+    const totalLiveWatchTimeSeconds: number = agg?.totalLiveWatchTimeSeconds ?? 0;
+    const totalReplayWatchTimeSeconds: number =
+      agg?.totalReplayWatchTimeSeconds ?? 0;
+    const liveWatchOfLiveViewers: number = agg?.liveWatchOfLiveViewers ?? 0;
+
+    return {
+      uniqueViewers,
+      liveViewers,
+      replayViewers,
+      totalSessions: agg?.totalSessions ?? 0,
+      totalWatchTimeSeconds,
+      totalLiveWatchTimeSeconds,
+      totalReplayWatchTimeSeconds,
+      avgWatchTimeSeconds: uniqueViewers
+        ? Math.round(totalWatchTimeSeconds / uniqueViewers)
+        : 0,
+      avgLiveWatchTimeSeconds: liveViewers
+        ? Math.round(liveWatchOfLiveViewers / liveViewers)
+        : 0,
+      avgReplayWatchTimeSeconds: replayViewers
+        ? Math.round(totalReplayWatchTimeSeconds / replayViewers)
+        : 0,
     };
   }
 

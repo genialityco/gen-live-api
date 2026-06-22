@@ -36,6 +36,7 @@ import {
 import { OrganizationsModule } from '../organizations/organizations.module';
 import { EventEmailModule } from '../event-email/event-email.module';
 import { EmailCampaignModule } from '../email-campaign/email-campaign.module';
+import { WaCampaignModule } from '../whatsapp-campaign/wa-campaign.module';
 import { Logger } from '@nestjs/common';
 
 @Module({
@@ -54,6 +55,7 @@ import { Logger } from '@nestjs/common';
     forwardRef(() => OrganizationsModule),
     EventEmailModule,
     EmailCampaignModule,
+    WaCampaignModule,
     forwardRef(() => LivekitModule),
   ],
   providers: [

@@ -228,6 +228,19 @@ export class EventsService implements OnModuleInit {
     return ev;
   }
 
+  /**
+   * Asegura que un evento en DIFERIDO tenga su watcher de presencia activo
+   * bajo demanda. Se llama desde el endpoint público al resolver el evento,
+   * de modo que basta con que un viewer abra el diferido para empezar a
+   * contabilizar su tiempo de visualización (el watcher se auto-apaga al
+   * quedar sin audiencia). Idempotente y barato.
+   */
+  ensureReplayPresenceWatch(eventId: string, status: string): void {
+    if (status === 'replay') {
+      this.watcher.watchOnDemand(eventId);
+    }
+  }
+
   async listByOwnerUid(ownerUid: string) {
     const orgs = await this.orgModel.find({ ownerUid }, { _id: 1 }).lean();
     const orgIds = orgs.map((o) => o._id);
@@ -259,7 +272,11 @@ export class EventsService implements OnModuleInit {
       // Inicializar métricas en RTDB cuando el evento pasa a live
       await this.metricsService.getEventMetrics(eventId);
       this.watcher.watch(eventId);
-    } else if (status === 'ended' || status === 'replay') {
+    } else if (status === 'replay') {
+      // Diferido: seguir contabilizando tiempo de visualización, pero on-demand
+      // (se auto-desactiva sin audiencia). El tiempo en diferido = total - live.
+      this.watcher.watchOnDemand(eventId);
+    } else if (status === 'ended') {
       this.watcher.unwatch(eventId);
     }
 

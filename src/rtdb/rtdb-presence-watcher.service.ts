@@ -41,6 +41,17 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
     Map<string, { ts: number; on: boolean }>
   >();
 
+  // ── Watchers on-demand (diferido) ────────────────────────────────────────
+  // eventId → lastActiveAt (ms). Eventos en 'replay' cuyo watcher se activa solo
+  // mientras haya audiencia y se auto-desactiva tras inactividad, para no acumular
+  // listeners indefinidamente sobre eventos pasados.
+  private onDemandEvents = new Map<string, number>();
+  /** Inactividad (sin presencia activa) antes de apagar un watcher on-demand */
+  private readonly ON_DEMAND_IDLE_MS = 3 * 60 * 1000; // 3 min
+  /** Frecuencia del barrido que apaga watchers on-demand inactivos */
+  private readonly IDLE_SWEEP_INTERVAL_MS = 60 * 1000; // 1 min
+  private idleSweepTimer: NodeJS.Timeout | null = null;
+
   // ── Per-event debounce timers ───────────────────────────────────────────
   // Colapsa ráfagas de child_* en una sola llamada a onPresenceChange().
   private flushTimers = new Map<string, NodeJS.Timeout>();
@@ -177,6 +188,15 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
       }
     }
 
+    // Mantener vivo el watcher on-demand mientras haya audiencia activa.
+    // Si no hay presencia, NO se refresca → el barrido lo apagará por inactividad.
+    if (
+      this.onDemandEvents.has(eventId) &&
+      Object.keys(presenceData).length > 0
+    ) {
+      this.onDemandEvents.set(eventId, now);
+    }
+
     // Telemetría de flush (cuántas veces por evento)
     const n = (this.flushCount.get(eventId) ?? 0) + 1;
     this.flushCount.set(eventId, n);
@@ -257,8 +277,54 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
     this.cleanStalePresence(eventId).catch(() => {});
   }
 
+  /**
+   * Activa el watcher para un evento en DIFERIDO (replay) BAJO DEMANDA (idempotente).
+   *
+   * A diferencia de watch(), el evento queda marcado como on-demand y se auto-desactiva
+   * tras ON_DEMAND_IDLE_MS sin presencia activa. Esto permite contabilizar el tiempo de
+   * visualización en diferido sin dejar listeners permanentes en cada evento pasado.
+   *
+   * Cada llamada (p.ej. cada viewer que abre el diferido) refresca la marca de actividad,
+   * por lo que es seguro invocarlo en cada carga del visor.
+   */
+  watchOnDemand(eventId: string): void {
+    this.onDemandEvents.set(eventId, Date.now());
+    this.watch(eventId); // idempotente: no re-adjunta si ya está activo
+    this.ensureIdleSweep();
+  }
+
+  /** Arranca el barrido periódico de watchers on-demand inactivos (lazy, una sola vez). */
+  private ensureIdleSweep(): void {
+    if (this.idleSweepTimer) return;
+    this.idleSweepTimer = setInterval(
+      () => this.sweepIdleOnDemand(),
+      this.IDLE_SWEEP_INTERVAL_MS,
+    );
+    // No mantener vivo el proceso solo por este timer
+    this.idleSweepTimer.unref?.();
+  }
+
+  /** Apaga los watchers on-demand que llevan demasiado tiempo sin audiencia. */
+  private sweepIdleOnDemand(): void {
+    const now = Date.now();
+    for (const [eventId, lastActiveAt] of this.onDemandEvents.entries()) {
+      if (now - lastActiveAt > this.ON_DEMAND_IDLE_MS) {
+        this.log.log(
+          `On-demand watcher idle ${Math.round((now - lastActiveAt) / 1000)}s → OFF for ${eventId}`,
+        );
+        this.unwatch(eventId); // también lo elimina de onDemandEvents
+      }
+    }
+    // Si ya no quedan watchers on-demand, detener el barrido
+    if (this.onDemandEvents.size === 0 && this.idleSweepTimer) {
+      clearInterval(this.idleSweepTimer);
+      this.idleSweepTimer = null;
+    }
+  }
+
   /** Desactiva watcher y libera todos los recursos asociados */
   unwatch(eventId: string): void {
+    this.onDemandEvents.delete(eventId);
     const detach = this.listeners.get(eventId);
     if (detach) {
       detach();
@@ -282,6 +348,10 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
 
   /** Limpieza al cerrar el proceso NestJS */
   onModuleDestroy(): void {
+    if (this.idleSweepTimer) {
+      clearInterval(this.idleSweepTimer);
+      this.idleSweepTimer = null;
+    }
     for (const [eventId, detach] of this.listeners.entries()) {
       try {
         detach();
@@ -296,6 +366,7 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
     this.presenceCache.clear();
     this.flushTimers.clear();
     this.flushFirstScheduled.clear();
+    this.onDemandEvents.clear();
   }
 
   /**

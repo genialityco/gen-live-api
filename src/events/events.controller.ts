@@ -32,6 +32,8 @@ import { TransferEventDto } from './dtos/transfer-event.dto';
 import { FindRegistrationDto } from './dtos/find-registration.dto';
 import { UpdateRegistrationDto } from './dtos/update-registration.dto';
 import { StorageService } from '../organizations/storage.service';
+import { EmailCampaignService } from '../email-campaign/email-campaign.service';
+import { WaCampaignService } from '../whatsapp-campaign/wa-campaign.service';
 
 @Controller('events')
 export class EventsController {
@@ -39,6 +41,8 @@ export class EventsController {
     private svc: EventsService,
     private storage: StorageService,
     private metricsService: ViewingMetricsService,
+    private emailCampaigns: EmailCampaignService,
+    private waCampaigns: WaCampaignService,
   ) {}
 
   // ENDPOINTS PÚBLICOS (sin autenticación)
@@ -314,6 +318,83 @@ export class EventsController {
   @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
   async getMetrics(@Param('eventId') eventId: string) {
     return await this.metricsService.getEventMetrics(eventId);
+  }
+
+  /**
+   * Informe global del evento: unifica las métricas de campañas de email y
+   * WhatsApp con el engagement / tiempo de visualización de los asistentes.
+   * Yuxtaposición (sin atribución canal→asistente).
+   */
+  @Get(':eventId/report')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async getEventReport(@Param('eventId') eventId: string) {
+    const event = await this.svc.findById(eventId);
+    const orgId = String(event.orgId);
+
+    const [emailCampaigns, waCampaigns, viewing, metrics] = await Promise.all([
+      this.emailCampaigns.listCampaigns(orgId, eventId),
+      this.waCampaigns.findAll(orgId, eventId),
+      this.metricsService.getEventWatchStats(eventId),
+      this.metricsService.getEventMetrics(eventId),
+    ]);
+
+    const sumEmail = (key: string) =>
+      emailCampaigns.reduce(
+        (acc, c: any) => acc + ((c.stats?.[key] as number) ?? 0),
+        0,
+      );
+    const sumWa = (key: string) =>
+      waCampaigns.reduce(
+        (acc, c: any) => acc + ((c.stats?.[key] as number) ?? 0),
+        0,
+      );
+
+    return {
+      eventId,
+      generatedAt: new Date().toISOString(),
+      email: {
+        campaignCount: emailCampaigns.length,
+        totals: {
+          total: sumEmail('total'),
+          sent: sumEmail('sent'),
+          bounced: sumEmail('bounced'),
+          failed: sumEmail('failed'),
+          clicked: sumEmail('clicked'),
+          totalClicks: sumEmail('totalClicks'),
+        },
+        campaigns: emailCampaigns.map((c: any) => ({
+          id: String(c._id),
+          name: c.name,
+          status: c.status,
+          stats: c.stats,
+        })),
+      },
+      whatsapp: {
+        campaignCount: waCampaigns.length,
+        totals: {
+          total: sumWa('total'),
+          sent: sumWa('sent'),
+          delivered: sumWa('delivered'),
+          read: sumWa('read'),
+          failed: sumWa('failed'),
+          optedOut: sumWa('optedOut'),
+          clicked: sumWa('clicked'),
+          totalClicks: sumWa('totalClicks'),
+        },
+        campaigns: waCampaigns.map((c: any) => ({
+          id: String(c._id),
+          name: c.name,
+          status: c.status,
+          stats: c.stats,
+        })),
+      },
+      viewing: {
+        currentConcurrentViewers: metrics?.currentConcurrentViewers ?? 0,
+        peakConcurrentViewers: metrics?.peakConcurrentViewers ?? 0,
+        totalUniqueViewers: metrics?.totalUniqueViewers ?? 0,
+        ...viewing,
+      },
+    };
   }
 
   // Recalcular métricas del evento (cuenta usuarios únicos que estuvieron durante live)

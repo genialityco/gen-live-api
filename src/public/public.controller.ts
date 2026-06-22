@@ -9,6 +9,10 @@ export class PublicController {
   @Get('events/:slug')
   async resolveEvent(@Param('slug') slug: string) {
     const ev = await this.events.bySlug(slug);
+    // Si el evento está en diferido, activar el watcher de presencia on-demand
+    // para contabilizar el tiempo de visualización del replay (se auto-apaga
+    // cuando no queda audiencia).
+    this.events.ensureReplayPresenceWatch(String(ev._id), ev.status);
     // Expón solo lo necesario públicamente
     return {
       eventId: String(ev._id),
