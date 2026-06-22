@@ -34,6 +34,7 @@ import { UpdateRegistrationDto } from './dtos/update-registration.dto';
 import { StorageService } from '../organizations/storage.service';
 import { EmailCampaignService } from '../email-campaign/email-campaign.service';
 import { WaCampaignService } from '../whatsapp-campaign/wa-campaign.service';
+import { RtdbPresenceWatcherService } from '../rtdb/rtdb-presence-watcher.service';
 
 @Controller('events')
 export class EventsController {
@@ -43,6 +44,7 @@ export class EventsController {
     private metricsService: ViewingMetricsService,
     private emailCampaigns: EmailCampaignService,
     private waCampaigns: WaCampaignService,
+    private watcher: RtdbPresenceWatcherService,
   ) {}
 
   // ENDPOINTS PÚBLICOS (sin autenticación)
@@ -389,7 +391,12 @@ export class EventsController {
         })),
       },
       viewing: {
-        currentConcurrentViewers: metrics?.currentConcurrentViewers ?? 0,
+        // "viendo ahora" solo es real si hay un watcher de presencia activo.
+        // Sin watcher (evento terminado, o diferido inactivo) el valor de Mongo
+        // puede estar pegado en el último conteo → lo forzamos a 0.
+        currentConcurrentViewers: this.watcher.isWatching(eventId)
+          ? (metrics?.currentConcurrentViewers ?? 0)
+          : 0,
         peakConcurrentViewers: metrics?.peakConcurrentViewers ?? 0,
         totalUniqueViewers: metrics?.totalUniqueViewers ?? 0,
         ...viewing,

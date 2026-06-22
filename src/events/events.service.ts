@@ -287,6 +287,9 @@ export class EventsService implements OnModuleInit {
         { new: true },
       );
       await this.rtdb.setNowCount(eventId, 0);
+      // Resetear el concurrente a 0 en Mongo: el evento terminó, no hay nadie
+      // "viendo ahora". Evita que el contador quede pegado en el último valor.
+      await this.metricsService.updateConcurrentViewers(eventId, []);
       // Calcular métricas finales cuando el evento termina
       await this.metricsService.calculateEventMetrics(eventId);
     }

@@ -304,6 +304,11 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
     this.idleSweepTimer.unref?.();
   }
 
+  /** Indica si hay un watcher de presencia activo para el evento. */
+  isWatching(eventId: string): boolean {
+    return this.listeners.has(eventId);
+  }
+
   /** Apaga los watchers on-demand que llevan demasiado tiempo sin audiencia. */
   private sweepIdleOnDemand(): void {
     const now = Date.now();
@@ -312,6 +317,13 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
         this.log.log(
           `On-demand watcher idle ${Math.round((now - lastActiveAt) / 1000)}s → OFF for ${eventId}`,
         );
+        // Resetear el concurrente a 0: sin watcher no hay nadie contado, evita
+        // que "viendo ahora" quede pegado en el último valor.
+        if (this.viewingMetricsService) {
+          this.viewingMetricsService
+            .updateConcurrentViewers(eventId, [])
+            .catch(() => {});
+        }
         this.unwatch(eventId); // también lo elimina de onDemandEvents
       }
     }
