@@ -38,7 +38,18 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
   // Actualizado directamente por child_* events — nunca lee RTDB en hot path.
   private presenceCache = new Map<
     string,
-    Map<string, { ts: number; on: boolean }>
+    Map<
+      string,
+      {
+        ts: number;
+        on: boolean;
+        // Estado de reproducción real reportado por el frontend (opcional):
+        // playing=true solo mientras el <video>/embed está reproduciendo.
+        // pmode indica si esa reproducción es del vivo o del diferido.
+        playing?: boolean;
+        pmode?: 'live' | 'replay' | null;
+      }
+    >
   >();
 
   // ── Watchers on-demand (diferido) ────────────────────────────────────────
@@ -92,9 +103,15 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
 
   // ── Cache helpers ────────────────────────────────────────────────────────
 
-  private getCacheForEvent(
-    eventId: string,
-  ): Map<string, { ts: number; on: boolean }> {
+  private getCacheForEvent(eventId: string): Map<
+    string,
+    {
+      ts: number;
+      on: boolean;
+      playing?: boolean;
+      pmode?: 'live' | 'replay' | null;
+    }
+  > {
     if (!this.presenceCache.has(eventId)) {
       this.presenceCache.set(eventId, new Map());
     }
@@ -113,7 +130,9 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
     }
     const on: boolean = data?.on ?? false;
     const ts: number = data?.ts ?? Date.now();
-    cache.set(uid, { ts, on });
+    const playing: boolean = data?.playing ?? false;
+    const pmode: 'live' | 'replay' | null = data?.pmode ?? null;
+    cache.set(uid, { ts, on, playing, pmode });
   }
 
   // ── Flush (debounced) ────────────────────────────────────────────────────
@@ -181,10 +200,23 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
     const now = Date.now();
 
     // Construir presenceData filtrando por TTL — SIN lectura a RTDB
-    const presenceData: Record<string, { on: boolean; ts: number }> = {};
+    const presenceData: Record<
+      string,
+      {
+        on: boolean;
+        ts: number;
+        playing?: boolean;
+        pmode?: 'live' | 'replay' | null;
+      }
+    > = {};
     for (const [uid, entry] of cache.entries()) {
       if (entry.on && now - entry.ts < this.PRESENCE_TTL_MS) {
-        presenceData[uid] = { on: true, ts: entry.ts };
+        presenceData[uid] = {
+          on: true,
+          ts: entry.ts,
+          playing: entry.playing ?? false,
+          pmode: entry.pmode ?? null,
+        };
       }
     }
 
@@ -405,7 +437,10 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
           for (const [uid, data] of Object.entries(val)) {
             const on: boolean = (data as any)?.on ?? false;
             const ts: number = (data as any)?.ts ?? Date.now();
-            cache.set(uid, { ts, on });
+            const playing: boolean = (data as any)?.playing ?? false;
+            const pmode: 'live' | 'replay' | null =
+              (data as any)?.pmode ?? null;
+            cache.set(uid, { ts, on, playing, pmode });
           }
         }
         this.log.debug(

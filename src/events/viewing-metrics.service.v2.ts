@@ -137,7 +137,18 @@ export class ViewingMetricsService {
    */
   async onPresenceChange(
     eventId: string,
-    presenceData: Record<string, { on: boolean; ts: number }>,
+    presenceData: Record<
+      string,
+      {
+        on: boolean;
+        ts: number;
+        // Reproducción real reportada por el frontend (opcional).
+        // playing=true solo mientras el reproductor está reproduciendo;
+        // pmode distingue si esa reproducción es del vivo o del diferido.
+        playing?: boolean;
+        pmode?: 'live' | 'replay' | null;
+      }
+    >,
   ) {
     // Resolver isLive desde caché para evitar un findById por cada flush.
     // La caché expira cada 30s; si el estado cambia (live→ended), se reflejará
@@ -299,6 +310,25 @@ export class ViewingMetricsService {
           if (isLive) {
             updates.$inc.liveWatchTimeSeconds = timeSinceLastHeartbeat;
             updates.wasLiveDuringSession = true;
+          }
+
+          // ── Tiempo de REPRODUCCIÓN real ──
+          // Solo se acumula si el frontend reporta playing=true (video
+          // efectivamente reproduciéndose). A diferencia de los campos de
+          // presencia de arriba, esto NO cuenta cuenta-regresiva, pausas ni
+          // pestañas de fondo. La atribución vivo/diferido usa pmode (lo que el
+          // reproductor estaba mostrando), con fallback al status del evento.
+          const presence = presenceData[uid];
+          if (presence?.playing) {
+            updates.$inc.playbackTotalSeconds = timeSinceLastHeartbeat;
+            const isReplayPlayback =
+              presence.pmode === 'replay' ||
+              (presence.pmode == null && !isLive);
+            if (isReplayPlayback) {
+              updates.$inc.playbackReplaySeconds = timeSinceLastHeartbeat;
+            } else {
+              updates.$inc.playbackLiveSeconds = timeSinceLastHeartbeat;
+            }
           }
 
           bulkOps.push({
@@ -625,47 +655,40 @@ export class ViewingMetricsService {
     avgLiveWatchTimeSeconds: number;
     avgReplayWatchTimeSeconds: number;
   }> {
+    // Basado en tiempo de REPRODUCCIÓN real (playback*), no en presencia.
+    // Esto evita que la cuenta-regresiva, pausas o pestañas de fondo inflen el
+    // tiempo "visto", y hace que el diferido no pueda superar la duración real
+    // del contenido (salvo re-visionados/seeks legítimos).
     const [agg] = await this.viewingSessionModel.aggregate([
       { $match: { eventId } },
       // Nivel 1: consolidar por espectador único (EventUser)
       {
         $group: {
           _id: '$eventUserId',
-          totalWatch: { $sum: '$totalWatchTimeSeconds' },
-          liveWatch: { $sum: '$liveWatchTimeSeconds' },
+          playbackTotal: { $sum: '$playbackTotalSeconds' },
+          playbackLive: { $sum: '$playbackLiveSeconds' },
+          playbackReplay: { $sum: '$playbackReplaySeconds' },
           sessions: { $sum: 1 },
-          wasLive: { $max: { $cond: ['$wasLiveDuringSession', 1, 0] } },
         },
       },
-      // El tiempo en diferido es lo visto fuera del live: total − live (nunca < 0)
-      {
-        $project: {
-          totalWatch: 1,
-          liveWatch: 1,
-          sessions: 1,
-          wasLive: 1,
-          replayWatch: {
-            $max: [{ $subtract: ['$totalWatch', '$liveWatch'] }, 0],
-          },
-        },
-      },
-      // Nivel 2: agregados globales del evento
+      // Nivel 2: agregados globales del evento. "Vieron" = reprodujeron de verdad,
+      // por lo que únicos / vivo / diferido se cuentan por playback > 0.
       {
         $group: {
           _id: null,
-          uniqueViewers: { $sum: 1 },
-          liveViewers: { $sum: '$wasLive' },
+          uniqueViewers: {
+            $sum: { $cond: [{ $gt: ['$playbackTotal', 0] }, 1, 0] },
+          },
+          liveViewers: {
+            $sum: { $cond: [{ $gt: ['$playbackLive', 0] }, 1, 0] },
+          },
           replayViewers: {
-            $sum: { $cond: [{ $gt: ['$replayWatch', 0] }, 1, 0] },
+            $sum: { $cond: [{ $gt: ['$playbackReplay', 0] }, 1, 0] },
           },
           totalSessions: { $sum: '$sessions' },
-          totalWatchTimeSeconds: { $sum: '$totalWatch' },
-          totalLiveWatchTimeSeconds: { $sum: '$liveWatch' },
-          totalReplayWatchTimeSeconds: { $sum: '$replayWatch' },
-          // suma del tiempo live solo de quienes estuvieron en vivo, para promediar bien
-          liveWatchOfLiveViewers: {
-            $sum: { $cond: [{ $eq: ['$wasLive', 1] }, '$liveWatch', 0] },
-          },
+          totalWatchTimeSeconds: { $sum: '$playbackTotal' },
+          totalLiveWatchTimeSeconds: { $sum: '$playbackLive' },
+          totalReplayWatchTimeSeconds: { $sum: '$playbackReplay' },
         },
       },
     ]);
@@ -674,10 +697,10 @@ export class ViewingMetricsService {
     const liveViewers: number = agg?.liveViewers ?? 0;
     const replayViewers: number = agg?.replayViewers ?? 0;
     const totalWatchTimeSeconds: number = agg?.totalWatchTimeSeconds ?? 0;
-    const totalLiveWatchTimeSeconds: number = agg?.totalLiveWatchTimeSeconds ?? 0;
+    const totalLiveWatchTimeSeconds: number =
+      agg?.totalLiveWatchTimeSeconds ?? 0;
     const totalReplayWatchTimeSeconds: number =
       agg?.totalReplayWatchTimeSeconds ?? 0;
-    const liveWatchOfLiveViewers: number = agg?.liveWatchOfLiveViewers ?? 0;
 
     return {
       uniqueViewers,
@@ -687,11 +710,13 @@ export class ViewingMetricsService {
       totalWatchTimeSeconds,
       totalLiveWatchTimeSeconds,
       totalReplayWatchTimeSeconds,
+      // Promedios sobre el subconjunto que realmente reprodujo cada modo,
+      // para que el promedio no se diluya con quienes nunca vieron ese tramo.
       avgWatchTimeSeconds: uniqueViewers
         ? Math.round(totalWatchTimeSeconds / uniqueViewers)
         : 0,
       avgLiveWatchTimeSeconds: liveViewers
-        ? Math.round(liveWatchOfLiveViewers / liveViewers)
+        ? Math.round(totalLiveWatchTimeSeconds / liveViewers)
         : 0,
       avgReplayWatchTimeSeconds: replayViewers
         ? Math.round(totalReplayWatchTimeSeconds / replayViewers)

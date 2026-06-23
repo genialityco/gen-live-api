@@ -35,6 +35,20 @@ export class ViewingSession extends Document {
   @Prop({ default: 0 })
   liveWatchTimeSeconds: number; // Tiempo visto mientras el evento estaba EN_VIVO
 
+  // ── Tiempo de REPRODUCCIÓN real (video efectivamente reproduciéndose) ──
+  // A diferencia de los campos de arriba (basados en presencia = pestaña abierta),
+  // estos solo se incrementan cuando el reproductor reporta playing=true.
+  // Es la base honesta para el informe: no cuenta cuenta-regresiva, pausas ni
+  // pestañas de fondo. Ver viewing-metrics.service onPresenceChange.
+  @Prop({ default: 0 })
+  playbackTotalSeconds: number; // Reproducción total real (vivo + diferido)
+
+  @Prop({ default: 0 })
+  playbackLiveSeconds: number; // Reproducción real mientras el evento estaba EN VIVO
+
+  @Prop({ default: 0 })
+  playbackReplaySeconds: number; // Reproducción real durante el diferido/replay
+
   @Prop({ type: Object })
   metadata?: {
     userAgent?: string;
