@@ -671,19 +671,23 @@ export class ViewingMetricsService {
           sessions: { $sum: 1 },
         },
       },
-      // Nivel 2: agregados globales del evento. "Vieron" = reprodujeron de verdad,
-      // por lo que únicos / vivo / diferido se cuentan por playback > 0.
+      // Nivel 2: agregados globales del evento (modelo HÍBRIDO):
+      //  - uniqueViewers  = ASISTENCIA: personas distintas que se conectaron
+      //                     (tienen sesión = presencia), reprodujeran o no.
+      //  - liveViewers / replayViewers = subconjuntos que REPRODUJERON de verdad.
+      //  - playbackViewers = denominador interno del promedio total (vieron algo).
       {
         $group: {
           _id: null,
-          uniqueViewers: {
-            $sum: { $cond: [{ $gt: ['$playbackTotal', 0] }, 1, 0] },
-          },
+          uniqueViewers: { $sum: 1 },
           liveViewers: {
             $sum: { $cond: [{ $gt: ['$playbackLive', 0] }, 1, 0] },
           },
           replayViewers: {
             $sum: { $cond: [{ $gt: ['$playbackReplay', 0] }, 1, 0] },
+          },
+          playbackViewers: {
+            $sum: { $cond: [{ $gt: ['$playbackTotal', 0] }, 1, 0] },
           },
           totalSessions: { $sum: '$sessions' },
           totalWatchTimeSeconds: { $sum: '$playbackTotal' },
@@ -696,6 +700,7 @@ export class ViewingMetricsService {
     const uniqueViewers: number = agg?.uniqueViewers ?? 0;
     const liveViewers: number = agg?.liveViewers ?? 0;
     const replayViewers: number = agg?.replayViewers ?? 0;
+    const playbackViewers: number = agg?.playbackViewers ?? 0;
     const totalWatchTimeSeconds: number = agg?.totalWatchTimeSeconds ?? 0;
     const totalLiveWatchTimeSeconds: number =
       agg?.totalLiveWatchTimeSeconds ?? 0;
@@ -710,10 +715,10 @@ export class ViewingMetricsService {
       totalWatchTimeSeconds,
       totalLiveWatchTimeSeconds,
       totalReplayWatchTimeSeconds,
-      // Promedios sobre el subconjunto que realmente reprodujo cada modo,
-      // para que el promedio no se diluya con quienes nunca vieron ese tramo.
-      avgWatchTimeSeconds: uniqueViewers
-        ? Math.round(totalWatchTimeSeconds / uniqueViewers)
+      // Promedios sobre el subconjunto que realmente reprodujo cada tramo,
+      // para que el promedio no se diluya con quienes solo se conectaron.
+      avgWatchTimeSeconds: playbackViewers
+        ? Math.round(totalWatchTimeSeconds / playbackViewers)
         : 0,
       avgLiveWatchTimeSeconds: liveViewers
         ? Math.round(totalLiveWatchTimeSeconds / liveViewers)
