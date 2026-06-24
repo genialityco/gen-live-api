@@ -17,7 +17,10 @@ const BATCH_SIZE = 20; // Meta Cloud API: cómodo bien por debajo del límite de
 export interface WaCampaignAnalytics {
   totalClicks: number;
   uniqueClickers: number;
-  byUtm: Record<string, Array<{ value: string; clicks: number; uniqueClickers: number }>>;
+  byUtm: Record<
+    string,
+    Array<{ value: string; sent: number; clicks: number; uniqueClickers: number }>
+  >;
 }
 
 export interface WaCountryReport {
@@ -621,10 +624,68 @@ export class WaCampaignService {
       },
     ]);
 
+    // Enviados por valor de UTM: agrega las entregas efectivamente enviadas
+    // (sentAt != null) por su `resolvedUtms`. Permite la comparativa
+    // "envío vs clic" por UTM, incluyendo valores sin clics todavía.
+    const sentUtmAgg = await this.deliveryModel.aggregate([
+      { $match: { campaignId: campaignObjId, sentAt: { $ne: null } } },
+      { $project: { resolvedUtms: { $objectToArray: '$resolvedUtms' } } },
+      { $unwind: '$resolvedUtms' },
+      {
+        $group: {
+          _id: { utmKey: '$resolvedUtms.k', utmValue: '$resolvedUtms.v' },
+          sent: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const sentMap = new Map<string, Map<string, number>>();
+    for (const row of sentUtmAgg) {
+      const key = row._id.utmKey as string;
+      const value = row._id.utmValue as string;
+      if (!sentMap.has(key)) sentMap.set(key, new Map());
+      sentMap.get(key)!.set(value, row.sent as number);
+    }
+
+    const utmKeys = new Set<string>([
+      ...utmAgg.map((u) => u._id as string),
+      ...sentMap.keys(),
+    ]);
+
     const byUtm: WaCampaignAnalytics['byUtm'] = {};
-    for (const { _id: utmKey, values } of utmAgg) {
-      byUtm[utmKey] = (values as Array<{ value: string; clicks: number; uniqueClickers: number }>)
-        .sort((a, b) => b.uniqueClickers - a.uniqueClickers);
+    for (const utmKey of utmKeys) {
+      const clickValues =
+        (utmAgg.find((u) => u._id === utmKey)?.values as Array<{
+          value: string;
+          clicks: number;
+          uniqueClickers: number;
+        }>) ?? [];
+
+      const merged = new Map<
+        string,
+        { value: string; sent: number; clicks: number; uniqueClickers: number }
+      >();
+      for (const [value, sent] of sentMap.get(utmKey) ?? []) {
+        merged.set(value, { value, sent, clicks: 0, uniqueClickers: 0 });
+      }
+      for (const cv of clickValues) {
+        const existing = merged.get(cv.value);
+        if (existing) {
+          existing.clicks = cv.clicks;
+          existing.uniqueClickers = cv.uniqueClickers;
+        } else {
+          merged.set(cv.value, {
+            value: cv.value,
+            sent: 0,
+            clicks: cv.clicks,
+            uniqueClickers: cv.uniqueClickers,
+          });
+        }
+      }
+
+      byUtm[utmKey] = [...merged.values()].sort(
+        (a, b) => b.sent - a.sent || b.uniqueClickers - a.uniqueClickers,
+      );
     }
 
     return { totalClicks, uniqueClickers, byUtm };

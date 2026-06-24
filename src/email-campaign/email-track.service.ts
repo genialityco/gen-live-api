@@ -17,7 +17,10 @@ import { GeoipService } from '../geoip/geoip.service';
 export interface CampaignAnalytics {
   totalClicks: number;
   uniqueClickers: number;
-  byUtm: Record<string, Array<{ value: string; clicks: number; uniqueClickers: number }>>;
+  byUtm: Record<
+    string,
+    Array<{ value: string; sent: number; clicks: number; uniqueClickers: number }>
+  >;
 }
 
 export interface GeoAnalytics {
@@ -199,10 +202,71 @@ export class EmailTrackService {
       },
     ]);
 
+    // Enviados por valor de UTM: agrega las entregas efectivamente enviadas
+    // por su `resolvedUtms`. Permite la comparativa "envío vs clic" por UTM,
+    // incluyendo valores enviados que aún no recibieron ningún clic.
+    const sentUtmAgg = await this.deliveryModel.aggregate([
+      { $match: { campaignId: campaignObjId, status: 'sent' } },
+      { $project: { utms: { $objectToArray: '$resolvedUtms' } } },
+      { $unwind: '$utms' },
+      {
+        $group: {
+          _id: { utmKey: '$utms.k', utmValue: '$utms.v' },
+          sent: { $sum: 1 },
+        },
+      },
+    ]);
+
+    // Mapa utmKey → (value → sent) para hacer la unión con los clics
+    const sentMap = new Map<string, Map<string, number>>();
+    for (const row of sentUtmAgg) {
+      const key = row._id.utmKey as string;
+      const value = row._id.utmValue as string;
+      if (!sentMap.has(key)) sentMap.set(key, new Map());
+      sentMap.get(key)!.set(value, row.sent as number);
+    }
+
+    // Unión de claves UTM presentes en clics y/o envíos
+    const utmKeys = new Set<string>([
+      ...utmAgg.map((u) => u._id as string),
+      ...sentMap.keys(),
+    ]);
+
     const byUtm: CampaignAnalytics['byUtm'] = {};
-    for (const { _id: utmKey, values } of utmAgg) {
-      byUtm[utmKey] = (values as Array<{ value: string; clicks: number; uniqueClickers: number }>)
-        .sort((a, b) => b.uniqueClickers - a.uniqueClickers);
+    for (const utmKey of utmKeys) {
+      const clickValues =
+        (utmAgg.find((u) => u._id === utmKey)?.values as Array<{
+          value: string;
+          clicks: number;
+          uniqueClickers: number;
+        }>) ?? [];
+
+      // value → { sent, clicks, uniqueClickers }
+      const merged = new Map<
+        string,
+        { value: string; sent: number; clicks: number; uniqueClickers: number }
+      >();
+      for (const [value, sent] of sentMap.get(utmKey) ?? []) {
+        merged.set(value, { value, sent, clicks: 0, uniqueClickers: 0 });
+      }
+      for (const cv of clickValues) {
+        const existing = merged.get(cv.value);
+        if (existing) {
+          existing.clicks = cv.clicks;
+          existing.uniqueClickers = cv.uniqueClickers;
+        } else {
+          merged.set(cv.value, {
+            value: cv.value,
+            sent: 0,
+            clicks: cv.clicks,
+            uniqueClickers: cv.uniqueClickers,
+          });
+        }
+      }
+
+      byUtm[utmKey] = [...merged.values()].sort(
+        (a, b) => b.sent - a.sent || b.uniqueClickers - a.uniqueClickers,
+      );
     }
 
     return { totalClicks, uniqueClickers, byUtm };

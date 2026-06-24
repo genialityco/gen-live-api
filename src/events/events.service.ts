@@ -229,6 +229,172 @@ export class EventsService implements OnModuleInit {
   }
 
   /**
+   * Distribución de los asistentes registrados al evento según campos clave del
+   * formulario de la org: país, perfil, especialidad y subespecialidad. Detecta
+   * cada campo por id/etiqueta (o por `optionsSource='countries'` para el país)
+   * y agrupa `OrgAttendee.registrationData[fieldId]` de quienes tienen el evento
+   * en `eventIds`, usando las etiquetas del propio formulario cuando existen.
+   * Devuelve solo las dimensiones que existan en el formulario.
+   */
+  async getRegistrationDistributions(eventId: string): Promise<{
+    total: number;
+    distributions: Array<{
+      key: 'pais' | 'perfil' | 'especialidad' | 'subespecialidad';
+      fieldId: string;
+      fieldLabel: string;
+      isCountry: boolean;
+      items: Array<{ value: string; label: string | null; count: number }>;
+      unknown: number;
+    }>;
+  }> {
+    const event = await this.model.findById(eventId).lean();
+    if (!event) throw new NotFoundException('Event not found');
+    const orgId = String(event.orgId);
+
+    const org = await this.orgModel.findById(orgId).lean();
+    const fields: any[] = (org as any)?.registrationForm?.fields ?? [];
+
+    const norm = (s: unknown) =>
+      String(s ?? '')
+        .normalize('NFD')
+        .replace(/[̀-ͯ]/g, '')
+        .toLowerCase();
+
+    // Cada campo se reclama una sola vez; el orden de llamada define prioridad
+    // (subespecialidad antes que especialidad para que reclame su campo propio).
+    const used = new Set<string>();
+    const pickField = (
+      test: (id: string, label: string, field: any) => boolean,
+    ): any | null => {
+      for (const f of fields) {
+        if (!f?.id || used.has(f.id)) continue;
+        if (test(norm(f.id), norm(f.label), f)) {
+          used.add(f.id);
+          return f;
+        }
+      }
+      return null;
+    };
+
+    const paisField = pickField(
+      (id, _label, f) =>
+        f?.optionsSource === 'countries' ||
+        (f?.type === 'select' && /^(pais|country)$/.test(id)),
+    );
+    const perfilField = pickField(
+      (id, label) => /perfil|profile/.test(id) || /perfil|profile/.test(label),
+    );
+    const subespField = pickField(
+      (id, label) =>
+        /sub_?-?especialidad|subespecialidad|subspecialty/.test(id) ||
+        /subespecialidad|subspecialty/.test(label),
+    );
+    const especField = pickField(
+      (id, label) =>
+        /especialidad|specialty/.test(id) || /especialidad|specialty/.test(label),
+    );
+
+    const total = await this.orgAttendeeModel.countDocuments({
+      organizationId: orgId,
+      eventIds: eventId,
+    });
+
+    const buildDistribution = async (
+      key: 'pais' | 'perfil' | 'especialidad' | 'subespecialidad',
+      field: any | null,
+      isCountry: boolean,
+    ) => {
+      if (!field) return null;
+      const fieldId: string = field.id;
+
+      // Mapas de las opciones del formulario para canonizar lo guardado: un mismo
+      // registro puede haber guardado el VALOR de la opción ('medico-especialista')
+      // o su ETIQUETA ('Médico Especialista'); ambos deben fusionarse en una barra.
+      const labelByValue = new Map<string, string>(); // value -> label
+      const valueByNormValue = new Map<string, string>(); // norm(value) -> value
+      const valueByNormLabel = new Map<string, string>(); // norm(label) -> value
+      for (const opt of (field.options ?? []) as Array<{
+        value: string;
+        label: string;
+      }>) {
+        if (opt?.value == null) continue;
+        const val = String(opt.value);
+        valueByNormValue.set(norm(val), val);
+        if (opt.label != null) {
+          labelByValue.set(val, opt.label);
+          valueByNormLabel.set(norm(opt.label), val);
+        }
+      }
+
+      const agg = await this.orgAttendeeModel.aggregate([
+        { $match: { organizationId: orgId, eventIds: eventId } },
+        {
+          $group: {
+            _id: { $ifNull: [`$registrationData.${fieldId}`, null] },
+            count: { $sum: 1 },
+          },
+        },
+      ]);
+
+      // Fusiona por la opción canónica (valor de la opción si se reconoce; si no,
+      // por el texto normalizado para unir variantes de mayúsculas/acentos).
+      const merged = new Map<
+        string,
+        { value: string; label: string | null; count: number }
+      >();
+      let unknown = 0;
+      for (const row of agg) {
+        const value = row._id;
+        if (
+          value == null ||
+          value === '' ||
+          (Array.isArray(value) && value.length === 0)
+        ) {
+          unknown += row.count;
+          continue;
+        }
+        const raw = Array.isArray(value) ? value.join(', ') : String(value);
+        const canonicalValue =
+          valueByNormValue.get(norm(raw)) ??
+          valueByNormLabel.get(norm(raw)) ??
+          raw;
+        const mergeKey = norm(canonicalValue);
+        const existing = merged.get(mergeKey);
+        if (existing) {
+          existing.count += row.count;
+        } else {
+          merged.set(mergeKey, {
+            value: canonicalValue,
+            label: labelByValue.get(canonicalValue) ?? null,
+            count: row.count,
+          });
+        }
+      }
+      const items = [...merged.values()].sort((a, b) => b.count - a.count);
+
+      return {
+        key,
+        fieldId,
+        fieldLabel: field.label ?? fieldId,
+        isCountry,
+        items,
+        unknown,
+      };
+    };
+
+    const distributions = (
+      await Promise.all([
+        buildDistribution('pais', paisField, true),
+        buildDistribution('perfil', perfilField, false),
+        buildDistribution('especialidad', especField, false),
+        buildDistribution('subespecialidad', subespField, false),
+      ])
+    ).filter((d): d is NonNullable<typeof d> => d != null);
+
+    return { total, distributions };
+  }
+
+  /**
    * Asegura que un evento en DIFERIDO tenga su watcher de presencia activo
    * bajo demanda. Se llama desde el endpoint público al resolver el evento,
    * de modo que basta con que un viewer abra el diferido para empezar a

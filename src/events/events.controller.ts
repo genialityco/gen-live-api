@@ -345,14 +345,21 @@ export class EventsController {
     const event = await this.svc.findById(eventId);
     const orgId = String(event.orgId);
 
-    const [emailCampaigns, waCampaigns, viewing, metrics, concurrentNow] =
-      await Promise.all([
-        this.emailCampaigns.listCampaigns(orgId, eventId),
-        this.waCampaigns.findAll(orgId, eventId),
-        this.metricsService.getEventWatchStats(eventId),
-        this.metricsService.getEventMetrics(eventId),
-        this.metricsService.getConcurrentViewersFromPresence(eventId),
-      ]);
+    const [
+      emailCampaigns,
+      waCampaigns,
+      viewing,
+      metrics,
+      concurrentNow,
+      registrations,
+    ] = await Promise.all([
+      this.emailCampaigns.listCampaigns(orgId, eventId),
+      this.waCampaigns.findAll(orgId, eventId),
+      this.metricsService.getEventWatchStats(eventId),
+      this.metricsService.getEventMetrics(eventId),
+      this.metricsService.getConcurrentViewersFromPresence(eventId),
+      this.svc.getRegistrationDistributions(eventId),
+    ]);
 
     const sumEmail = (key: string) =>
       emailCampaigns.reduce(
@@ -413,6 +420,7 @@ export class EventsController {
         totalUniqueViewers: metrics?.totalUniqueViewers ?? 0,
         ...viewing,
       },
+      registrations,
     };
   }
 
