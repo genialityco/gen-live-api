@@ -335,6 +335,17 @@ export class EventsController {
   }
 
   /**
+   * Series temporales para la pestaña de Métricas: momentos de inscripción
+   * (registeredAt) y momentos de conexión (ViewingSession.startedAt), agregados
+   * por minuto. El frontend reagrupa a semana/día/hora/minuto.
+   */
+  @Get(':eventId/timelines')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async getEventTimelines(@Param('eventId') eventId: string) {
+    return this.svc.getEventTimelines(eventId);
+  }
+
+  /**
    * Informe global del evento: unifica las métricas de campañas de email y
    * WhatsApp con el engagement / tiempo de visualización de los asistentes.
    * Yuxtaposición (sin atribución canal→asistente).
@@ -342,6 +353,63 @@ export class EventsController {
   @Get(':eventId/report')
   @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
   async getEventReport(@Param('eventId') eventId: string) {
+    return this.buildReport(eventId);
+  }
+
+  /**
+   * Informe PÚBLICO y compartible por enlace (sin autenticación). Resuelve el
+   * evento por slug y devuelve el informe junto a la metadata mínima del evento
+   * y la organización (nombre/logo/header) necesaria para la cabecera. No expone
+   * ninguna otra sección del admin.
+   */
+  @Get('public/:slug/report')
+  async getPublicEventReport(@Param('slug') slug: string) {
+    const event = await this.svc.bySlug(slug);
+    const eventId = String(event._id);
+    const [report, meta] = await Promise.all([
+      this.buildReport(eventId),
+      this.svc.getEventReportPublicMeta(eventId),
+    ]);
+    return { ...meta, report };
+  }
+
+  /**
+   * Métricas PÚBLICAS y compartibles por enlace (sin autenticación). Pensado
+   * para polling desde la página pública: concurrentes (desde la presencia real
+   * en RTDB), pico, total de únicos y las series temporales. Incluye metadata
+   * mínima del evento/org para la cabecera. No expone otras secciones del admin.
+   */
+  @Get('public/:slug/metrics')
+  async getPublicEventMetrics(@Param('slug') slug: string) {
+    const event = await this.svc.bySlug(slug);
+    const eventId = String(event._id);
+    const [meta, metricsDoc, concurrentNow, timelines] = await Promise.all([
+      this.svc.getEventReportPublicMeta(eventId),
+      this.metricsService.getEventMetrics(eventId),
+      this.metricsService.getConcurrentViewersFromPresence(eventId),
+      this.svc.getEventTimelines(eventId),
+    ]);
+    return {
+      ...meta,
+      metrics: {
+        currentConcurrentViewers: concurrentNow,
+        peakConcurrentViewers: metricsDoc?.peakConcurrentViewers ?? 0,
+        totalUniqueViewers: metricsDoc?.totalUniqueViewers ?? 0,
+        lastUpdate: metricsDoc?.lastUpdate
+          ? new Date(metricsDoc.lastUpdate).getTime()
+          : Date.now(),
+      },
+      timelines,
+    };
+  }
+
+  /**
+   * Construye el informe global del evento: unifica las métricas de campañas de
+   * email y WhatsApp con el engagement / tiempo de visualización de los
+   * asistentes. Yuxtaposición (sin atribución canal→asistente). Reutilizado por
+   * el endpoint autenticado y por el público.
+   */
+  private async buildReport(eventId: string) {
     const event = await this.svc.findById(eventId);
     const orgId = String(event.orgId);
 

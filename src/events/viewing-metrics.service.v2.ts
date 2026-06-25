@@ -46,6 +46,12 @@ export class ViewingMetricsService {
   // Con 30s, el próximo flush re-chequea si la asociación ya ocurrió.
   private readonly UNKNOWN_UID_CACHE_TTL = 30 * 1000; // 30 segundos de caché
 
+  // Throttle del recálculo del total de únicos durante el live. Recalcular el
+  // distinct de EventUsers en cada flush sería innecesario; con esta ventana el
+  // total crece "en tiempo real" (lag máx ≈ heartbeat) sin sobrecargar Mongo.
+  private readonly lastUniqueRecalc = new Map<string, number>();
+  private readonly UNIQUE_RECALC_TTL_MS = 15_000; // 15 segundos
+
   constructor(
     @InjectModel(ViewingSession.name)
     private viewingSessionModel: Model<ViewingSession>,
@@ -102,6 +108,28 @@ export class ViewingMetricsService {
       update.$setOnInsert.peakConcurrentViewers = 0;
     }
 
+    // Durante el live, recalcular el TOTAL de asistentes únicos para que crezca
+    // en tiempo real (sin esperar al botón "Recalcular"). Se hace con throttle
+    // (UNIQUE_RECALC_TTL_MS) usando un distinct indexado {eventId,
+    // wasLiveDuringSession}. Como las sesiones nuevas de este flush ya se
+    // insertaron antes de llamar a _persistMetrics, el conteo las incluye.
+    let liveUniqueTotal: number | null = null;
+    if (isLive) {
+      const last = this.lastUniqueRecalc.get(eventId) ?? 0;
+      if (Date.now() - last >= this.UNIQUE_RECALC_TTL_MS) {
+        // Agregación que devuelve SOLO el conteo (no todos los IDs), para no
+        // transferir megabytes de ObjectIds en eventos masivos.
+        const [agg] = await this.viewingSessionModel.aggregate<{ n: number }>([
+          { $match: { eventId, wasLiveDuringSession: true } },
+          { $group: { _id: '$eventUserId' } },
+          { $count: 'n' },
+        ]);
+        liveUniqueTotal = agg?.n ?? 0;
+        this.lastUniqueRecalc.set(eventId, Date.now());
+        update.$set.totalUniqueViewers = liveUniqueTotal;
+      }
+    }
+
     // Upsert atómico: evita contención sobre el mismo doc (WiredTiger hot doc)
     const metrics = await this.eventMetricsModel
       .findOneAndUpdate({ eventId }, update, { upsert: true, new: true })
@@ -109,7 +137,7 @@ export class ViewingMetricsService {
       .exec();
 
     const peak = metrics?.peakConcurrentViewers ?? currentConcurrent;
-    const total = metrics?.totalUniqueViewers ?? 0;
+    const total = liveUniqueTotal ?? metrics?.totalUniqueViewers ?? 0;
 
     // Escrituras RTDB en paralelo — una vez por flush, no una por heartbeat.
     // setNowCount y publishMetrics son independientes entre sí, no tiene sentido

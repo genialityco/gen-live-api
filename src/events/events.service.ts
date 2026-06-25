@@ -229,6 +229,84 @@ export class EventsService implements OnModuleInit {
   }
 
   /**
+   * Series temporales del evento para la pestaña de Métricas:
+   *  - registrations: momentos de INSCRIPCIÓN (EventUser.registeredAt)
+   *  - connections:   momentos de CONEXIÓN al evento (ViewingSession.startedAt,
+   *                   una entrada por sesión = dispositivo/pestaña)
+   *
+   * Se agregan a resolución de MINUTO (en UTC); el frontend reagrupa a
+   * semana/día/hora/minuto en la zona horaria local del navegador. Devolver
+   * buckets por minuto (en vez de timestamps crudos) mantiene el payload pequeño
+   * sin perder granularidad para los gráficos.
+   */
+  async getEventTimelines(eventId: string): Promise<{
+    registeredTotal: number;
+    connectionsTotal: number;
+    registrations: Array<{ t: string; c: number }>;
+    connections: Array<{ t: string; c: number }>;
+  }> {
+    const minuteBucket = (dateField: string) => ({
+      $dateToString: {
+        format: '%Y-%m-%dT%H:%M:00.000Z',
+        date: `$${dateField}`,
+        timezone: 'UTC',
+      },
+    });
+
+    const buildSeries = async (
+      model: Model<any>,
+      dateField: string,
+    ): Promise<Array<{ t: string; c: number }>> => {
+      const rows = await model.aggregate([
+        { $match: { eventId, [dateField]: { $ne: null } } },
+        { $group: { _id: minuteBucket(dateField), c: { $sum: 1 } } },
+        { $sort: { _id: 1 } },
+      ]);
+      return rows.map((r: any) => ({ t: r._id as string, c: r.c as number }));
+    };
+
+    const [registrations, connections] = await Promise.all([
+      buildSeries(this.eventUserModel as unknown as Model<any>, 'registeredAt'),
+      buildSeries(
+        this.viewingSessionModel as unknown as Model<any>,
+        'startedAt',
+      ),
+    ]);
+
+    const sum = (arr: Array<{ c: number }>) =>
+      arr.reduce((acc, r) => acc + r.c, 0);
+
+    return {
+      registeredTotal: sum(registrations),
+      connectionsTotal: sum(connections),
+      registrations,
+      connections,
+    };
+  }
+
+  /**
+   * Metadata mínima para la cabecera del informe PÚBLICO: nombre/fecha/branding
+   * del evento + nombre y logo de la organización. No incluye datos sensibles.
+   */
+  async getEventReportPublicMeta(eventId: string) {
+    const event = await this.model.findById(eventId).lean();
+    if (!event) throw new NotFoundException('Event not found');
+    const org = await this.orgModel.findById(String(event.orgId)).lean();
+    return {
+      event: {
+        title: event.title,
+        status: event.status,
+        schedule: event.schedule ?? null,
+        branding: event.branding ?? null,
+      },
+      org: {
+        name: (org as any)?.name ?? null,
+        branding: { logoUrl: (org as any)?.branding?.logoUrl ?? null },
+      },
+    };
+  }
+
+  /**
    * Distribución de los asistentes registrados al evento según campos clave del
    * formulario de la org: país, perfil, especialidad y subespecialidad. Detecta
    * cada campo por id/etiqueta (o por `optionsSource='countries'` para el país)
@@ -238,13 +316,20 @@ export class EventsService implements OnModuleInit {
    */
   async getRegistrationDistributions(eventId: string): Promise<{
     total: number;
+    viewersTotal: number;
     distributions: Array<{
       key: 'pais' | 'perfil' | 'especialidad' | 'subespecialidad';
       fieldId: string;
       fieldLabel: string;
       isCountry: boolean;
-      items: Array<{ value: string; label: string | null; count: number }>;
-      unknown: number;
+      items: Array<{
+        value: string;
+        label: string | null;
+        count: number; // registrados con esta opción
+        viewers: number; // espectadores únicos (asistieron) con esta opción
+      }>;
+      unknown: number; // registrados sin valor en este campo
+      unknownViewers: number; // espectadores únicos sin valor en este campo
     }>;
   }> {
     const event = await this.model.findById(eventId).lean();
@@ -299,6 +384,32 @@ export class EventsService implements OnModuleInit {
       eventIds: eventId,
     });
 
+    // ── Espectadores únicos (ASISTENCIA) cruzados con su registro ──────────────
+    // Cadena: ViewingSession (presencia/reproducción) → EventUser → OrgAttendee.
+    // "Espectador único" = persona distinta con al menos una ViewingSession
+    // (misma definición que getEventWatchStats.uniqueViewers). De ahí saltamos a
+    // su attendeeId para poder seccionar la asistencia por perfil/especialidad/etc.
+    const viewerEventUserIds = await this.viewingSessionModel.distinct(
+      'eventUserId',
+      { eventId },
+    );
+    const viewerEventUsers = await this.eventUserModel
+      .find({ _id: { $in: viewerEventUserIds } }, { attendeeId: 1 })
+      .lean();
+    const viewerAttendeeIds = [
+      ...new Set(viewerEventUsers.map((e) => String(e.attendeeId))),
+    ].map((id) => new Types.ObjectId(id));
+
+    // Registrados de este evento que realmente asistieron (denominador de la
+    // comparativa); puede ser < uniqueViewers si hubiera asistentes no registrados.
+    const viewersTotal = viewerAttendeeIds.length
+      ? await this.orgAttendeeModel.countDocuments({
+          organizationId: orgId,
+          eventIds: eventId,
+          _id: { $in: viewerAttendeeIds },
+        })
+      : 0;
+
     const buildDistribution = async (
       key: 'pais' | 'perfil' | 'especialidad' | 'subespecialidad',
       field: any | null,
@@ -326,49 +437,77 @@ export class EventsService implements OnModuleInit {
         }
       }
 
-      const agg = await this.orgAttendeeModel.aggregate([
-        { $match: { organizationId: orgId, eventIds: eventId } },
-        {
-          $group: {
-            _id: { $ifNull: [`$registrationData.${fieldId}`, null] },
-            count: { $sum: 1 },
+      const canonize = (raw: string) =>
+        valueByNormValue.get(norm(raw)) ??
+        valueByNormLabel.get(norm(raw)) ??
+        raw;
+
+      // Agrupa los registros (opcionalmente acotados a un subconjunto de attendees)
+      // por la opción canónica del campo. Devuelve el mapa fusionado + sin-valor.
+      const aggregateBy = async (extraMatch: Record<string, unknown>) => {
+        const rows = await this.orgAttendeeModel.aggregate([
+          { $match: { organizationId: orgId, eventIds: eventId, ...extraMatch } },
+          {
+            $group: {
+              _id: { $ifNull: [`$registrationData.${fieldId}`, null] },
+              count: { $sum: 1 },
+            },
           },
-        },
+        ]);
+        const counts = new Map<string, { value: string; count: number }>();
+        let unknown = 0;
+        for (const row of rows) {
+          const value = row._id;
+          if (
+            value == null ||
+            value === '' ||
+            (Array.isArray(value) && value.length === 0)
+          ) {
+            unknown += row.count;
+            continue;
+          }
+          const raw = Array.isArray(value) ? value.join(', ') : String(value);
+          const canonicalValue = canonize(raw);
+          const mergeKey = norm(canonicalValue);
+          const existing = counts.get(mergeKey);
+          if (existing) existing.count += row.count;
+          else counts.set(mergeKey, { value: canonicalValue, count: row.count });
+        }
+        return { counts, unknown };
+      };
+
+      const [registered, viewers] = await Promise.all([
+        aggregateBy({}),
+        viewerAttendeeIds.length
+          ? aggregateBy({ _id: { $in: viewerAttendeeIds } })
+          : Promise.resolve({
+              counts: new Map<string, { value: string; count: number }>(),
+              unknown: 0,
+            }),
       ]);
 
-      // Fusiona por la opción canónica (valor de la opción si se reconoce; si no,
-      // por el texto normalizado para unir variantes de mayúsculas/acentos).
+      // Fusiona registrados + espectadores en una sola fila por opción canónica.
       const merged = new Map<
         string,
-        { value: string; label: string | null; count: number }
+        { value: string; label: string | null; count: number; viewers: number }
       >();
-      let unknown = 0;
-      for (const row of agg) {
-        const value = row._id;
-        if (
-          value == null ||
-          value === '' ||
-          (Array.isArray(value) && value.length === 0)
-        ) {
-          unknown += row.count;
-          continue;
-        }
-        const raw = Array.isArray(value) ? value.join(', ') : String(value);
-        const canonicalValue =
-          valueByNormValue.get(norm(raw)) ??
-          valueByNormLabel.get(norm(raw)) ??
-          raw;
-        const mergeKey = norm(canonicalValue);
-        const existing = merged.get(mergeKey);
-        if (existing) {
-          existing.count += row.count;
-        } else {
-          merged.set(mergeKey, {
-            value: canonicalValue,
-            label: labelByValue.get(canonicalValue) ?? null,
-            count: row.count,
-          });
-        }
+      for (const [mergeKey, { value, count }] of registered.counts) {
+        merged.set(mergeKey, {
+          value,
+          label: labelByValue.get(value) ?? null,
+          count,
+          viewers: viewers.counts.get(mergeKey)?.count ?? 0,
+        });
+      }
+      // Opciones que solo aparecen entre los espectadores (raro, pero posible).
+      for (const [mergeKey, { value, count }] of viewers.counts) {
+        if (merged.has(mergeKey)) continue;
+        merged.set(mergeKey, {
+          value,
+          label: labelByValue.get(value) ?? null,
+          count: 0,
+          viewers: count,
+        });
       }
       const items = [...merged.values()].sort((a, b) => b.count - a.count);
 
@@ -378,7 +517,8 @@ export class EventsService implements OnModuleInit {
         fieldLabel: field.label ?? fieldId,
         isCountry,
         items,
-        unknown,
+        unknown: registered.unknown,
+        unknownViewers: viewers.unknown,
       };
     };
 
@@ -391,7 +531,7 @@ export class EventsService implements OnModuleInit {
       ])
     ).filter((d): d is NonNullable<typeof d> => d != null);
 
-    return { total, distributions };
+    return { total, viewersTotal, distributions };
   }
 
   /**
