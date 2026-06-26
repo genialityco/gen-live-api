@@ -127,6 +127,11 @@ export class ViewingMetricsService {
         liveUniqueTotal = agg?.n ?? 0;
         this.lastUniqueRecalc.set(eventId, Date.now());
         update.$set.totalUniqueViewers = liveUniqueTotal;
+        // No puede estar en $set y $setOnInsert a la vez (MongoDB lanza
+        // "would create a conflict at 'totalUniqueViewers'"). Si vamos a
+        // escribirlo explícitamente, lo quitamos del $setOnInsert: el upsert
+        // ya quedará con el valor recalculado al crear el doc.
+        delete update.$setOnInsert.totalUniqueViewers;
       }
     }
 
