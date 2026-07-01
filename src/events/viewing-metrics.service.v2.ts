@@ -32,7 +32,7 @@ export class ViewingMetricsService {
    */
   private readonly eventStatusCache = new Map<
     string,
-    { isLive: boolean; expiresAt: number }
+    { isLive: boolean; isReplay: boolean; expiresAt: number }
   >();
   private readonly EVENT_STATUS_CACHE_TTL_MS = 30_000; // 30 segundos
 
@@ -187,9 +187,11 @@ export class ViewingMetricsService {
     // La caché expira cada 30s; si el estado cambia (live→ended), se reflejará
     // en el próximo ciclo de caché a más tardar.
     let isLive: boolean;
+    let isReplay: boolean;
     const cachedStatus = this.eventStatusCache.get(eventId);
     if (cachedStatus && Date.now() < cachedStatus.expiresAt) {
       isLive = cachedStatus.isLive;
+      isReplay = cachedStatus.isReplay;
     } else {
       // Solo proyectar el campo necesario para reducir transferencia de datos
       const event = await this.eventModel
@@ -200,8 +202,10 @@ export class ViewingMetricsService {
         return;
       }
       isLive = event.status === 'live';
+      isReplay = event.status === 'replay';
       this.eventStatusCache.set(eventId, {
         isLive,
+        isReplay,
         expiresAt: Date.now() + this.EVENT_STATUS_CACHE_TTL_MS,
       });
     }
@@ -324,6 +328,7 @@ export class ViewingMetricsService {
           totalWatchTimeSeconds: 0,
           liveWatchTimeSeconds: 0,
           wasLiveDuringSession: isLive,
+          wasReplayDuringSession: isReplay,
         });
       } else {
         // Actualizar sesión existente con bulk operation
@@ -343,6 +348,13 @@ export class ViewingMetricsService {
           if (isLive) {
             updates.$inc.liveWatchTimeSeconds = timeSinceLastHeartbeat;
             updates.wasLiveDuringSession = true;
+          }
+
+          // Marca de presencia en el DIFERIDO: si el evento está en replay
+          // durante este heartbeat, la sesión cuenta como "vio en diferido"
+          // (aunque la reproducción sea 0). Espejo de wasLiveDuringSession.
+          if (isReplay) {
+            updates.wasReplayDuringSession = true;
           }
 
           // ── Tiempo de REPRODUCCIÓN real ──

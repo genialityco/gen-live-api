@@ -288,4 +288,74 @@ export class EventUserService {
       };
     });
   }
+
+  // Obtener usuarios que estuvieron en el DIFERIDO (presencia después del fin
+  // del evento). A diferencia de getLiveAttendees, NO excluye a los asistentes en
+  // vivo: una misma persona puede aparecer en ambas listas si volvió al diferido.
+  // Se basa en presencia (haya reproducido o no) y adjunta el tiempo de
+  // reproducción real en diferido (playbackReplaySeconds) por persona.
+  async getReplayAttendees(eventId: string): Promise<any[]> {
+    // Diferido = presencia con el evento en estado REPLAY. Se basa en el estado
+    // real del evento durante la sesión (wasReplayDuringSession), NO en fechas
+    // (endedAt/schedule.endsAt) — así el limbo `ended` no cuenta como diferido y
+    // no dependemos de un timestamp poco fiable.
+    //
+    // wasReplayDuringSession es PROSPECTIVO (se empezó a grabar con este cambio).
+    // Para eventos históricos, la única señal de replay grabada es la
+    // reproducción real en diferido, así que la usamos como fallback: quien
+    // reprodujo el diferido (playbackReplaySeconds > 0) también es diferido.
+    const filter: any = {
+      eventId,
+      $or: [
+        { wasReplayDuringSession: true },
+        { playbackReplaySeconds: { $gt: 0 } },
+      ],
+    };
+
+    const replaySessions = await this.viewingSessionModel.find(filter).lean();
+
+    // IDs únicos de EventUsers
+    const uniqueEventUserIds = [
+      ...new Set(replaySessions.map((s) => s.eventUserId.toString())),
+    ];
+
+    const eventUsers = await this.eventUserModel
+      .find({ _id: { $in: uniqueEventUserIds } })
+      .populate(
+        'attendeeId',
+        'email name registrationData organizationId isActive',
+      )
+      .lean()
+      .exec();
+
+    return eventUsers.map((eventUser: any) => {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call
+      const eventUserId = eventUser._id.toString() as string;
+      const userSessions = replaySessions.filter(
+        (s) => s.eventUserId.toString() === eventUserId,
+      );
+
+      // Tiempo de REPRODUCCIÓN real en diferido (no presencia)
+      const replayWatchTime = userSessions.reduce(
+        (sum, s) => sum + (s.playbackReplaySeconds || 0),
+        0,
+      );
+
+      // Última actividad en el diferido (heartbeat más reciente)
+      const lastHeartbeat = userSessions
+        .map((s) => s.lastHeartbeat)
+        .filter(Boolean)
+        .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-return
+      return {
+        ...eventUser,
+        viewingStats: {
+          totalSessions: userSessions.length,
+          replayWatchTimeSeconds: replayWatchTime,
+          lastHeartbeat,
+        },
+      };
+    });
+  }
 }

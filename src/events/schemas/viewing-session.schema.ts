@@ -32,6 +32,9 @@ export class ViewingSession extends Document {
   @Prop({ default: false })
   wasLiveDuringSession: boolean; // Si el evento estuvo EN_VIVO durante esta sesión
 
+  @Prop({ default: false })
+  wasReplayDuringSession: boolean; // Si el evento estuvo en DIFERIDO (replay) durante esta sesión
+
   @Prop({ default: 0 })
   liveWatchTimeSeconds: number; // Tiempo visto mientras el evento estaba EN_VIVO
 
@@ -67,4 +70,5 @@ ViewingSessionSchema.index({ eventId: 1, eventUserId: 1 }); // Todas las sesione
 ViewingSessionSchema.index({ eventId: 1, lastHeartbeat: 1 }); // Sesiones activas por evento
 ViewingSessionSchema.index({ eventId: 1, firebaseUID: 1, endedAt: 1 }); // Buscar sesión activa específica (CRÍTICO para performance)
 ViewingSessionSchema.index({ eventId: 1, wasLiveDuringSession: 1 }); // Sesiones que vieron el live
+ViewingSessionSchema.index({ eventId: 1, wasReplayDuringSession: 1 }); // Sesiones presentes en el diferido
 ViewingSessionSchema.index({ endedAt: 1, lastHeartbeat: 1 }); // Para limpieza de sesiones obsoletas

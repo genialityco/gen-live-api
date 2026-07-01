@@ -103,4 +103,9 @@ export class EventUserController {
   async getLiveAttendees(@Param('eventId') eventId: string) {
     return await this.eventUserService.getLiveAttendees(eventId);
   }
+
+  @Get('event/:eventId/replay-attendees')
+  async getReplayAttendees(@Param('eventId') eventId: string) {
+    return await this.eventUserService.getReplayAttendees(eventId);
+  }
 }
