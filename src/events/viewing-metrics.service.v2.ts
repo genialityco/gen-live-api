@@ -52,6 +52,16 @@ export class ViewingMetricsService {
   private readonly lastUniqueRecalc = new Map<string, number>();
   private readonly UNIQUE_RECALC_TTL_MS = 15_000; // 15 segundos
 
+  // Intervalo mínimo entre escrituras de una MISMA sesión. El heartbeat del
+  // frontend es 15s y el watcher hace flush cada 2-5s; sin este guard cada
+  // sesión se reescribía en CADA flush (~5x escrituras redundantes durante el
+  // vivo). Con el guard, cada sesión se escribe ~1 vez por heartbeat.
+  // El tiempo se acumula por delta desde el ÚLTIMO write, así que los totales
+  // NO pierden exactitud; solo la atribución fina (vivo/diferido, reproducción)
+  // baja de ~3s a ~15s de granularidad — la tolerancia con la que se diseñó el
+  // sistema. Reduce la carga de escritura ~5x (clave para bajar a tier Flex).
+  private readonly MIN_SESSION_WRITE_INTERVAL_SECONDS = 12;
+
   constructor(
     @InjectModel(ViewingSession.name)
     private viewingSessionModel: Model<ViewingSession>,
@@ -338,6 +348,24 @@ export class ViewingMetricsService {
 
         // Solo actualizar si el heartbeat es razonable
         if (timeSinceLastHeartbeat <= 120) {
+          // ── Anti-writes redundantes (habilita tier Flex) ──
+          // Si pasó poco tiempo desde el último write de ESTA sesión, omitimos
+          // el write: el tiempo NO se pierde, el próximo write acumulará el
+          // delta completo desde el último write. Mitigación: NUNCA saltar si
+          // falta marcar un flag de estado (wasLive/wasReplay), para no dejar
+          // sin marcar a un asistente/diferido de presencia muy corta.
+          const needsLiveFlag = isLive && !existingSession.wasLiveDuringSession;
+          const needsReplayFlag =
+            isReplay && !existingSession.wasReplayDuringSession;
+
+          if (
+            timeSinceLastHeartbeat < this.MIN_SESSION_WRITE_INTERVAL_SECONDS &&
+            !needsLiveFlag &&
+            !needsReplayFlag
+          ) {
+            continue; // omitir write; lastHeartbeat se deja intacto a propósito
+          }
+
           const updates: any = {
             lastHeartbeat: now,
             $inc: {
