@@ -232,13 +232,20 @@ export class EventUserService {
       .lean();
   }
 
-  // Obtener usuarios que asistieron en vivo (tuvieron ViewingSession)
+  // Obtener usuarios que asistieron en vivo (REPRODUJERON el vivo).
+  // Criterio unificado con el informe (getEventWatchStats.liveViewers):
+  // "asistió en vivo" = reprodujo de verdad durante el live
+  // (playbackLiveSeconds > 0), NO solo presencia. Antes se basaba en presencia
+  // (wasLiveDuringSession), lo que hacía que este conteo fuera mayor que el
+  // "Vieron en vivo" del informe. Se alineó a reproducción real.
   async getLiveAttendees(eventId: string): Promise<any[]> {
-    // Obtener todas las sesiones que estuvieron durante el live
+    // Solo sesiones con reproducción real en vivo. El conjunto de EventUsers
+    // distintos resultante coincide con liveViewers del informe (quien tiene
+    // playback total > 0 tiene al menos una sesión con playbackLiveSeconds > 0).
     const liveSessions = await this.viewingSessionModel
       .find({
         eventId,
-        wasLiveDuringSession: true,
+        playbackLiveSeconds: { $gt: 0 },
       })
       .lean();
 
@@ -267,12 +274,14 @@ export class EventUserService {
         (s) => s.eventUserId.toString() === eventUserId,
       );
 
+      // Tiempos de REPRODUCCIÓN real (playback*), coherentes con el criterio de
+      // arriba y con los tiempos del informe (no presencia/heartbeat).
       const totalWatchTime = userSessions.reduce(
-        (sum, s) => sum + s.totalWatchTimeSeconds,
+        (sum, s) => sum + (s.playbackTotalSeconds || 0),
         0,
       );
       const liveWatchTime = userSessions.reduce(
-        (sum, s) => sum + s.liveWatchTimeSeconds,
+        (sum, s) => sum + (s.playbackLiveSeconds || 0),
         0,
       );
 
@@ -289,27 +298,17 @@ export class EventUserService {
     });
   }
 
-  // Obtener usuarios que estuvieron en el DIFERIDO (presencia después del fin
-  // del evento). A diferencia de getLiveAttendees, NO excluye a los asistentes en
-  // vivo: una misma persona puede aparecer en ambas listas si volvió al diferido.
-  // Se basa en presencia (haya reproducido o no) y adjunta el tiempo de
-  // reproducción real en diferido (playbackReplaySeconds) por persona.
+  // Obtener usuarios que VIERON el diferido (REPRODUJERON de verdad el replay).
+  // Criterio unificado con el informe (getEventWatchStats.replayViewers):
+  // "vio en diferido" = reproducción real en diferido (playbackReplaySeconds > 0),
+  // NO presencia. Antes se incluía también la presencia en replay
+  // (wasReplayDuringSession), lo que hacía este conteo mayor que el "Vieron en
+  // diferido" del informe. Se alineó a reproducción real. No excluye a los
+  // asistentes en vivo: una misma persona puede aparecer en ambas listas.
   async getReplayAttendees(eventId: string): Promise<any[]> {
-    // Diferido = presencia con el evento en estado REPLAY. Se basa en el estado
-    // real del evento durante la sesión (wasReplayDuringSession), NO en fechas
-    // (endedAt/schedule.endsAt) — así el limbo `ended` no cuenta como diferido y
-    // no dependemos de un timestamp poco fiable.
-    //
-    // wasReplayDuringSession es PROSPECTIVO (se empezó a grabar con este cambio).
-    // Para eventos históricos, la única señal de replay grabada es la
-    // reproducción real en diferido, así que la usamos como fallback: quien
-    // reprodujo el diferido (playbackReplaySeconds > 0) también es diferido.
     const filter: any = {
       eventId,
-      $or: [
-        { wasReplayDuringSession: true },
-        { playbackReplaySeconds: { $gt: 0 } },
-      ],
+      playbackReplaySeconds: { $gt: 0 },
     };
 
     const replaySessions = await this.viewingSessionModel.find(filter).lean();
