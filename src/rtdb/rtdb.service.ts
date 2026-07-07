@@ -51,6 +51,49 @@ export class RtdbService {
   }
 
   /**
+   * Modo emergencia (fallback ante Mongo lento/caído): cachea en RTDB los datos
+   * mínimos que EventAttendGcore necesita para renderizar transmisión + chat
+   * sin tocar Mongo. Se escribe cada vez que cambian status/stream/playback en
+   * Mongo, independientemente de si el modo está activo o no, para que el
+   * cache ya esté listo cuando el admin lo active desde "Control del evento".
+   * Clave por orgSlug/eventSlug (no eventId) porque el frontend los tiene
+   * directo en la URL, sin necesidad de resolverlos vía Mongo.
+   */
+  async mirrorEventEmergencyData(
+    orgSlug: string,
+    eventSlug: string,
+    data: {
+      eventId: string;
+      title: string;
+      status: string;
+      playbackHlsUrl: string | null;
+      streamUrl: string | null;
+      streamProvider: string | null;
+      orgBranding?: any;
+      eventBranding?: any;
+    },
+  ) {
+    await this.ref(`/eventEmergency/${orgSlug}/${eventSlug}/data`).set({
+      ...data,
+      updatedAt: admin.database.ServerValue.TIMESTAMP,
+    });
+  }
+
+  /**
+   * Toggle manual del modo emergencia (desde EventAdminControl). Ruta separada
+   * de /data para que refrescar el cache nunca pise el estado del switch.
+   */
+  async setEventEmergencyActive(
+    orgSlug: string,
+    eventSlug: string,
+    active: boolean,
+  ) {
+    await this.ref(`/eventEmergency/${orgSlug}/${eventSlug}/active`).set(
+      active,
+    );
+  }
+
+  /**
    * Eliminar datos de una ruta específica de RTDB
    */
   async delete(path: string) {

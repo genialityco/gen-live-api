@@ -1,5 +1,11 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-import { Injectable, NotFoundException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  Logger,
+  Inject,
+  forwardRef,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import {
@@ -7,6 +13,7 @@ import {
   LiveStreamConfigDocument,
 } from './schemas/live-stream-config.schema';
 import { MuxService } from './mux.service';
+import { EventsService } from '../events/events.service';
 
 @Injectable()
 export class LiveConfigService {
@@ -27,6 +34,8 @@ export class LiveConfigService {
     @InjectModel(LiveStreamConfig.name)
     private readonly model: Model<LiveStreamConfigDocument>,
     private readonly mux: MuxService,
+    @Inject(forwardRef(() => EventsService))
+    private readonly eventsService: EventsService,
   ) {}
 
   private isMuxUrl(
@@ -151,11 +160,22 @@ export class LiveConfigService {
   async update(eventSlug: string, patch: Partial<LiveStreamConfig>) {
     // Invalidar caché al modificar para que el próximo get() lea el valor actualizado
     this.configCache.delete(eventSlug);
-    return this.model.findOneAndUpdate(
+    const updated = await this.model.findOneAndUpdate(
       { eventSlug },
       { $set: { ...patch, eventSlug } },
       { new: true, upsert: true },
     );
+    // Refresca el cache de modo emergencia (RTDB) para que playbackHlsUrl quede
+    // al día incluso cuando el cambio viene de /provision (sin setConfig
+    // posterior que sincronice event.stream).
+    void this.eventsService
+      .mirrorEmergencyCacheBySlug(eventSlug)
+      .catch((err: unknown) =>
+        this.log.warn(
+          `No se pudo refrescar el cache de modo emergencia para ${eventSlug}: ${String(err)}`,
+        ),
+      );
+    return updated;
   }
 
   async get(eventSlug: string) {

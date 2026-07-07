@@ -573,6 +573,7 @@ export class EventsService implements OnModuleInit {
       .lean();
     if (!ev) throw new NotFoundException('Event not found');
     await this.rtdb.setStatus(eventId, status);
+    void this.mirrorEmergencyCache(ev);
 
     if (status === 'live') {
       // Inicializar métricas en RTDB cuando el evento pasa a live
@@ -781,6 +782,7 @@ export class EventsService implements OnModuleInit {
       }
     }
 
+    void this.mirrorEmergencyCache(ev);
     return { ok: true, eventId, stream: ev.stream };
   }
 
@@ -808,7 +810,94 @@ export class EventsService implements OnModuleInit {
         { new: true },
       )
       .lean();
+    if (ev) void this.mirrorEmergencyCache(ev);
     return ev ?? null;
+  }
+
+  /**
+   * Modo emergencia: refresca en RTDB (/eventEmergency/{orgSlug}/{eventSlug})
+   * el snapshot mínimo que EventAttendGcore necesita para renderizar
+   * transmisión + chat sin Mongo (ver ANALISIS_DIFERIDOS.md-style docs / plan
+   * "modo emergencia"). Se dispara en cada cambio de status/stream/playback,
+   * independientemente de si el modo está activo, para que el cache ya esté
+   * listo cuando el admin lo active desde "Control del evento".
+   * Re-lee el doc completo (en vez de recibir un delta) para evitar que
+   * distintos call-sites pisen campos entre sí con snapshots parciales.
+   */
+  private async mirrorEmergencyCache(
+    ev: Pick<
+      EventDocument,
+      '_id' | 'slug' | 'title' | 'status' | 'stream' | 'branding' | 'orgId'
+    >,
+  ) {
+    if (!ev.slug) return;
+    try {
+      const org = await this.orgModel
+        .findById(ev.orgId, { domainSlug: 1, branding: 1 })
+        .lean();
+      if (!org?.domainSlug) return;
+
+      let playbackHlsUrl: string | null = null;
+      try {
+        const cfg = await this.liveConfigService.get(ev.slug);
+        playbackHlsUrl = cfg?.playbackHlsUrl || null;
+      } catch {
+        // Sin LiveStreamConfig todavía (evento nunca provisionado) — está bien.
+      }
+
+      await this.rtdb.mirrorEventEmergencyData(org.domainSlug, ev.slug, {
+        eventId: String(ev._id),
+        title: ev.title,
+        status: ev.status,
+        playbackHlsUrl,
+        streamUrl: ev.stream?.url ?? null,
+        streamProvider: ev.stream?.provider ?? null,
+        orgBranding: org.branding ?? null,
+        eventBranding: ev.branding ?? null,
+      });
+      this.logger.log(
+        `[emergency-mode] cache refrescado en /eventEmergency/${org.domainSlug}/${ev.slug}/data (status=${ev.status}, playbackHlsUrl=${playbackHlsUrl ? 'sí' : 'no'})`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo refrescar el cache de modo emergencia para ${ev.slug}: ${String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Toggle manual del modo emergencia, disparado desde "Control del evento".
+   */
+  async setEmergencyActive(eventId: string, active: boolean) {
+    const ev = await this.model.findById(eventId).lean();
+    if (!ev) throw new NotFoundException('Event not found');
+    const org = await this.orgModel
+      .findById(ev.orgId, { domainSlug: 1 })
+      .lean();
+    if (!org?.domainSlug) {
+      throw new NotFoundException('Organization domainSlug not found');
+    }
+    if (active) {
+      // Asegura que /data esté fresco justo antes de activar el switch — si el
+      // evento no tuvo cambios de status/stream/playback desde que se
+      // desplegó este feature, el cache nunca se habría poblado solo.
+      await this.mirrorEmergencyCache(ev);
+    }
+    this.logger.log(
+      `[emergency-mode] set /eventEmergency/${org.domainSlug}/${ev.slug}/active = ${active} (eventId=${eventId})`,
+    );
+    await this.rtdb.setEventEmergencyActive(org.domainSlug, ev.slug, active);
+    return { ok: true, eventId, active };
+  }
+
+  /**
+   * Llamado por LiveConfigService.update() para que los cambios de
+   * playbackHlsUrl (setConfig/provision) también refresquen el cache de modo
+   * emergencia, incluso cuando no hay un cambio de status/stream asociado.
+   */
+  async mirrorEmergencyCacheBySlug(eventSlug: string) {
+    const ev = await this.model.findOne({ slug: eventSlug }).lean();
+    if (ev) await this.mirrorEmergencyCache(ev);
   }
 
   /**

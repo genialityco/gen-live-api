@@ -26,6 +26,7 @@ import { CreateEventDto } from './dtos/create-event.dto';
 import { UpdateEventDto } from './dtos/update-event.dto';
 import { UpdateStatusDto } from './dtos/update-status.dto';
 import { UpdateStreamDto } from './dtos/update-stream.dto';
+import { UpdateEmergencyModeDto } from './dtos/update-emergency-mode.dto';
 import { UpdateEventBrandingDto } from './dtos/update-event-branding.dto';
 import { RegisterToEventDto } from './dtos/register-to-event.dto';
 import { TransferEventDto } from './dtos/transfer-event.dto';
@@ -234,6 +235,16 @@ export class EventsController {
     @Body() dto: UpdateStreamDto,
   ) {
     return this.svc.updateStream(eventId, dto);
+  }
+
+  // Toggle de "modo emergencia" (dueñ@ del evento) — ver plan modo emergencia.
+  @Patch(':eventId/emergency-mode')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async setEmergencyMode(
+    @Param('eventId') eventId: string,
+    @Body() dto: UpdateEmergencyModeDto,
+  ) {
+    return this.svc.setEmergencyActive(eventId, dto.active);
   }
 
   // Actualiza branding del evento (dueñ@ del evento)
