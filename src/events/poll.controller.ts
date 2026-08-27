@@ -13,6 +13,7 @@ import {
   Request,
 } from '@nestjs/common';
 import { PollService } from './poll.service';
+import { EventsService } from './events.service';
 import {
   CreatePollDto,
   UpdatePollDto,
@@ -24,7 +25,10 @@ import { FirebaseAuthGuard } from '../common/guards/firebase-auth.guard';
 
 @Controller('events/:eventId/polls')
 export class PollController {
-  constructor(private readonly pollService: PollService) {}
+  constructor(
+    private readonly pollService: PollService,
+    private readonly eventsService: EventsService,
+  ) {}
 
   /**
    * Crear una nueva encuesta (Admin)
@@ -131,6 +135,20 @@ export class PollController {
   @UseGuards(FirebaseAuthGuard)
   async getStatistics(@Param('pollId') pollId: string) {
     return this.pollService.getStatistics(pollId);
+  }
+
+  /**
+   * Resultados PÚBLICOS de una encuesta, compartibles por enlace (sin auth).
+   * Solo responde si el admin activó "mostrar estadísticas" en la encuesta.
+   * GET /events/:eventId/polls/:pollId/public-results
+   */
+  @Get(':pollId/public-results')
+  async getPublicResults(@Param('pollId') pollId: string) {
+    const poll = await this.pollService.getPublicStatistics(pollId);
+    const meta = await this.eventsService.getEventReportPublicMeta(
+      poll.eventId,
+    );
+    return { ...meta, poll };
   }
 
   /**

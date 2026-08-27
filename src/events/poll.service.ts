@@ -469,6 +469,24 @@ export class PollService {
   }
 
   /**
+   * Estadísticas PÚBLICAS de una encuesta (sin autenticación), para el enlace
+   * compartible de resultados. Solo devuelve datos si el admin activó
+   * "mostrar estadísticas" (showStatistics) en la encuesta.
+   */
+  async getPublicStatistics(pollId: string) {
+    const poll = await this.findOne(pollId);
+
+    if (!poll.showStatistics) {
+      throw new BadRequestException(
+        'Los resultados de esta encuesta no son públicos',
+      );
+    }
+
+    const statistics = await this.getStatistics(pollId);
+    return { ...statistics, eventId: String(poll.eventId) };
+  }
+
+  /**
    * Obtener la encuesta activa de un evento
    */
   async getActivePoll(eventSlugOrId: string): Promise<Poll | null> {
