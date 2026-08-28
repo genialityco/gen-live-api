@@ -268,6 +268,16 @@ export class EventsController {
     return await this.svc.updateCertificatesConfig(eventId, dto.enabled);
   }
 
+  // Sincroniza en bloque con gen-certificados a los asistentes que ya
+  // asistieron en vivo (dueñ@ del evento) — para "recrear/insertar"
+  // asistentes después del evento sin depender de que cada uno vuelva a
+  // visitar la página de attend.
+  @Post(':eventId/certificates-config/backfill')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async backfillCertificates(@Param('eventId') eventId: string) {
+    return await this.svc.backfillCertificates(eventId);
+  }
+
   // Resuelve si el attendee puede descargar su certificado y el link (público)
   @Get(':eventId/certificate-link')
   async getCertificateLink(

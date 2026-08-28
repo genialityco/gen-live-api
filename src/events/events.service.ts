@@ -1042,18 +1042,31 @@ export class EventsService implements OnModuleInit {
         },
         { certOrganizationId, certEventId },
       );
-      if (!provisioned) return;
 
-      certOrganizationId = provisioned.certOrganizationId;
-      certEventId = provisioned.certEventId;
-      await this.model.findByIdAndUpdate(eventId, {
-        certificatesConfig: {
-          ...(event.certificatesConfig || {}),
-          enabled: true,
-          certOrganizationId,
-          certEventId,
-        },
-      });
+      certOrganizationId = provisioned.certOrganizationId ?? certOrganizationId;
+      certEventId = provisioned.certEventId ?? certEventId;
+
+      // Persistir aunque sea parcial (solo certOrganizationId): evita crear
+      // una Organization duplicada en gen-certificados en el próximo intento.
+      if (certOrganizationId || certEventId) {
+        await this.model.findByIdAndUpdate(eventId, {
+          certificatesConfig: {
+            ...(event.certificatesConfig || {}),
+            enabled: true,
+            ...(certOrganizationId && { certOrganizationId }),
+            ...(certEventId && { certEventId }),
+          },
+        });
+      }
+
+      if (!certOrganizationId || !certEventId) {
+        await this.eventUserModel.findByIdAndUpdate(eventUser._id, {
+          certificateSyncError:
+            provisioned.error ||
+            'No se pudo aprovisionar el backend de certificados',
+        });
+        return;
+      }
     }
 
     const result = await this.certificatesService.syncAttendee({
@@ -1645,6 +1658,7 @@ export class EventsService implements OnModuleInit {
       ...(event.certificatesConfig || { enabled: false }),
       enabled,
     };
+    let provisionError: string | undefined;
 
     if (
       enabled &&
@@ -1661,14 +1675,162 @@ export class EventsService implements OnModuleInit {
         },
         certificatesConfig,
       );
-      if (provisioned) {
-        certificatesConfig = { ...certificatesConfig, ...provisioned };
+      certificatesConfig = {
+        ...certificatesConfig,
+        ...(provisioned.certOrganizationId && {
+          certOrganizationId: provisioned.certOrganizationId,
+        }),
+        ...(provisioned.certEventId && {
+          certEventId: provisioned.certEventId,
+        }),
+      };
+      provisionError = provisioned.error;
+    }
+
+    // Persistir siempre (incluso si el provisioning falló parcialmente): así
+    // no se pierde un certOrganizationId ya creado ni se duplica en el
+    // próximo intento.
+    const updated = await this.model
+      .findByIdAndUpdate(eventId, { certificatesConfig }, { new: true })
+      .lean();
+
+    if (provisionError) {
+      // El toggle sí quedó activado (y lo que se pudo aprovisionar quedó
+      // guardado), pero el admin necesita saber que gen-certificados no
+      // terminó de crearse — antes esto se tragaba en silencio.
+      throw new BadRequestException(
+        `Certificados activado, pero falló el aprovisionamiento en el backend externo: ${provisionError}`,
+      );
+    }
+
+    // Fire-and-forget: si se activa mientras el evento ya está en vivo (o ya
+    // terminó), no hay que esperar a que cada asistente vuelva a visitar la
+    // página de attend para quedar sincronizado — se hace de una vez en
+    // bloque para quienes ya acumularon playback en vivo.
+    if (
+      enabled &&
+      (event.status === 'live' ||
+        event.status === 'ended' ||
+        event.status === 'replay')
+    ) {
+      this.backfillCertificates(eventId).catch((err) =>
+        this.logger.error('Certificates backfill failed:', err?.message ?? err),
+      );
+    }
+
+    return updated;
+  }
+
+  /**
+   * Sincroniza en bloque con el backend externo de certificados a todos los
+   * EventUsers que asistieron en vivo (mismo criterio que getCertificateLink:
+   * ViewingSession.playbackLiveSeconds > 0) y que aún no tienen
+   * certificateAttendeeId. Pensado para "recrear/insertar" asistentes después
+   * del evento sin depender de que cada uno vuelva a visitar la página de
+   * attend. Se ejecuta en lotes para no saturar el backend externo.
+   */
+  async backfillCertificates(eventId: string) {
+    const event = await this.model.findById(eventId).lean();
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+
+    let certOrganizationId = event.certificatesConfig?.certOrganizationId;
+    let certEventId = event.certificatesConfig?.certEventId;
+
+    if (!certOrganizationId || !certEventId) {
+      const org = await this.orgModel.findById(event.orgId, { name: 1 }).lean();
+      const provisioned = await this.certificatesService.ensureProvisioned(
+        {
+          orgName: org?.name || 'Organización',
+          eventTitle: event.title,
+          startsAt: event.schedule?.startsAt,
+          endsAt: event.schedule?.endsAt,
+        },
+        { certOrganizationId, certEventId },
+      );
+      certOrganizationId = provisioned.certOrganizationId ?? certOrganizationId;
+      certEventId = provisioned.certEventId ?? certEventId;
+
+      if (certOrganizationId || certEventId) {
+        await this.model.findByIdAndUpdate(eventId, {
+          certificatesConfig: {
+            ...(event.certificatesConfig || {}),
+            enabled: true,
+            ...(certOrganizationId && { certOrganizationId }),
+            ...(certEventId && { certEventId }),
+          },
+        });
+      }
+
+      if (!certOrganizationId || !certEventId) {
+        return {
+          total: 0,
+          synced: 0,
+          failed: 0,
+          error:
+            provisioned.error ||
+            'No se pudo aprovisionar el backend de certificados',
+        };
       }
     }
 
-    return await this.model
-      .findByIdAndUpdate(eventId, { certificatesConfig }, { new: true })
+    const liveEventUserIds = await this.viewingSessionModel.distinct(
+      'eventUserId',
+      { eventId, playbackLiveSeconds: { $gt: 0 } },
+    );
+
+    const pendingEventUsers = await this.eventUserModel
+      .find({
+        _id: { $in: liveEventUserIds },
+        $or: [
+          { certificateAttendeeId: { $exists: false } },
+          { certificateAttendeeId: null },
+        ],
+      })
+      .populate('attendeeId', 'email name')
       .lean();
+
+    const BATCH_SIZE = 10;
+    let synced = 0;
+    let failed = 0;
+
+    for (let i = 0; i < pendingEventUsers.length; i += BATCH_SIZE) {
+      const batch = pendingEventUsers.slice(i, i + BATCH_SIZE);
+      const results = await Promise.all(
+        batch.map(async (eventUser: any) => {
+          const attendee = eventUser.attendeeId;
+          if (!attendee?.email) return false;
+
+          const result = await this.certificatesService.syncAttendee({
+            certEventId: certEventId,
+            certOrganizationId: certOrganizationId,
+            email: attendee.email,
+            name: attendee.name,
+          });
+
+          if (result) {
+            await this.eventUserModel.findByIdAndUpdate(eventUser._id, {
+              certificateAttendeeId: result.certificateAttendeeId,
+              certificateMemberId: result.certificateMemberId,
+              certificateSyncedAt: new Date(),
+              certificateSyncError: null,
+            });
+            return true;
+          }
+
+          await this.eventUserModel.findByIdAndUpdate(eventUser._id, {
+            certificateSyncError:
+              'Fallo al sincronizar con backend de certificados',
+          });
+          return false;
+        }),
+      );
+      synced += results.filter(Boolean).length;
+      failed += results.filter((r) => !r).length;
+    }
+
+    return { total: pendingEventUsers.length, synced, failed };
   }
 
   /**
