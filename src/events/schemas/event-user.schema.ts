@@ -1,12 +1,20 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 
 @Schema({ timestamps: true })
 export class EventUser extends Document {
   @Prop({ required: true })
   eventId: string; // ID del evento
 
-  @Prop({ type: Types.ObjectId, ref: 'OrgAttendee', required: true })
+  // type debe ser MongooseSchema.Types.ObjectId (no Types.ObjectId): con
+  // Types.ObjectId, SchemaFactory.createForClass registra este path como
+  // Mixed en vez de ObjectId, por lo que findOne({attendeeId: "<string>"})
+  // nunca hace auto-cast y no matchea nada aunque el documento exista.
+  @Prop({
+    type: MongooseSchema.Types.ObjectId,
+    ref: 'OrgAttendee',
+    required: true,
+  })
   attendeeId: Types.ObjectId; // Referencia al OrgAttendee
 
   @Prop()
