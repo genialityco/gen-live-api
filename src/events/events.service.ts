@@ -1723,11 +1723,12 @@ export class EventsService implements OnModuleInit {
 
   /**
    * Sincroniza en bloque con el backend externo de certificados a todos los
-   * EventUsers que asistieron en vivo (mismo criterio que getCertificateLink:
-   * ViewingSession.playbackLiveSeconds > 0) y que aún no tienen
-   * certificateAttendeeId. Pensado para "recrear/insertar" asistentes después
-   * del evento sin depender de que cada uno vuelva a visitar la página de
-   * attend. Se ejecuta en lotes para no saturar el backend externo.
+   * EventUsers que reprodujeron el evento de verdad, en vivo o en diferido
+   * (mismo criterio que getCertificateLink: ViewingSession.playbackTotalSeconds
+   * > 0) y que aún no tienen certificateAttendeeId. Pensado para
+   * "recrear/insertar" asistentes después del evento sin depender de que cada
+   * uno vuelva a visitar la página de attend. Se ejecuta en lotes para no
+   * saturar el backend externo.
    */
   async backfillCertificates(eventId: string) {
     const event = await this.model.findById(eventId).lean();
@@ -1775,14 +1776,14 @@ export class EventsService implements OnModuleInit {
       }
     }
 
-    const liveEventUserIds = await this.viewingSessionModel.distinct(
+    const watchedEventUserIds = await this.viewingSessionModel.distinct(
       'eventUserId',
-      { eventId, playbackLiveSeconds: { $gt: 0 } },
+      { eventId, playbackTotalSeconds: { $gt: 0 } },
     );
 
     const pendingEventUsers = await this.eventUserModel
       .find({
-        _id: { $in: liveEventUserIds },
+        _id: { $in: watchedEventUserIds },
         $or: [
           { certificateAttendeeId: { $exists: false } },
           { certificateAttendeeId: null },
@@ -1835,8 +1836,9 @@ export class EventsService implements OnModuleInit {
 
   /**
    * Resuelve el link de descarga del certificado para un attendee, aplicando
-   * ambos gates del lado del servidor: toggle habilitado + asistencia real en
-   * vivo (playbackLiveSeconds > 0, mismo criterio que getLiveAttendees).
+   * ambos gates del lado del servidor: toggle habilitado + reproducción real
+   * del evento, en vivo o en diferido (ViewingSession.playbackTotalSeconds >
+   * 0). No exige que haya sido en vivo: ver la grabación también cuenta.
    */
   async getCertificateLink(eventId: string, attendeeId: string) {
     const event = await this.model
@@ -1890,14 +1892,14 @@ export class EventsService implements OnModuleInit {
       return { allowed: false, reason: 'not_synced' };
     }
 
-    const attendedLive = await this.viewingSessionModel.exists({
+    const watchedEvent = await this.viewingSessionModel.exists({
       eventId,
       eventUserId: eventUser._id,
-      playbackLiveSeconds: { $gt: 0 },
+      playbackTotalSeconds: { $gt: 0 },
     });
 
-    if (!attendedLive) {
-      return { allowed: false, reason: 'did_not_attend_live' };
+    if (!watchedEvent) {
+      return { allowed: false, reason: 'did_not_watch' };
     }
 
     return {
