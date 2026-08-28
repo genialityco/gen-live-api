@@ -32,6 +32,19 @@ export class EventUser extends Document {
 
   @Prop({ type: Object })
   additionalData?: Record<string, any>; // Datos adicionales específicos del evento
+
+  // ─── Certificado de asistencia (backend externo de certificados) ────────
+  @Prop()
+  certificateAttendeeId?: string; // _id del Attendee creado en backend-gen
+
+  @Prop()
+  certificateMemberId?: string; // _id del Member creado en backend-gen
+
+  @Prop()
+  certificateSyncedAt?: Date;
+
+  @Prop()
+  certificateSyncError?: string;
 }
 
 export const EventUserSchema = SchemaFactory.createForClass(EventUser);

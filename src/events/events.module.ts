@@ -1,5 +1,10 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
-import { Module, OnModuleInit, OnModuleDestroy, forwardRef } from '@nestjs/common';
+import {
+  Module,
+  OnModuleInit,
+  OnModuleDestroy,
+  forwardRef,
+} from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Event, EventSchema } from './schemas/event.schema';
 import { EventUser, EventUserSchema } from './schemas/event-user.schema';
@@ -37,6 +42,7 @@ import { OrganizationsModule } from '../organizations/organizations.module';
 import { EventEmailModule } from '../event-email/event-email.module';
 import { EmailCampaignModule } from '../email-campaign/email-campaign.module';
 import { WaCampaignModule } from '../whatsapp-campaign/wa-campaign.module';
+import { CertificatesModule } from '../certificates/certificates.module';
 import { Logger } from '@nestjs/common';
 
 @Module({
@@ -56,6 +62,7 @@ import { Logger } from '@nestjs/common';
     EventEmailModule,
     EmailCampaignModule,
     WaCampaignModule,
+    CertificatesModule,
     forwardRef(() => LivekitModule),
   ],
   providers: [

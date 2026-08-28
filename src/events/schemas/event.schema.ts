@@ -37,6 +37,15 @@ export interface EventBrandingConfig {
   coverImageMobileUrl?: string;
 }
 
+export interface EventCertificatesConfig {
+  enabled: boolean;
+  // IDs del Event/Organization equivalentes en el backend externo de
+  // certificados (backend-gen). Se auto-provisionan la primera vez que se
+  // activa el toggle o se registra el primer attendee.
+  certOrganizationId?: string;
+  certEventId?: string;
+}
+
 @Schema({ timestamps: true })
 export class Event {
   @Prop({ type: Types.ObjectId, ref: 'Organization', required: true })
@@ -84,6 +93,9 @@ export class Event {
 
   @Prop({ type: Object })
   branding?: EventBrandingConfig;
+
+  @Prop({ type: Object })
+  certificatesConfig?: EventCertificatesConfig;
 
   @Prop({ default: false })
   hidden?: boolean;

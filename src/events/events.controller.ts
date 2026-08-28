@@ -28,6 +28,7 @@ import { UpdateStatusDto } from './dtos/update-status.dto';
 import { UpdateStreamDto } from './dtos/update-stream.dto';
 import { UpdateEmergencyModeDto } from './dtos/update-emergency-mode.dto';
 import { UpdateEventBrandingDto } from './dtos/update-event-branding.dto';
+import { UpdateCertificatesConfigDto } from './dtos/update-certificates-config.dto';
 import { RegisterToEventDto } from './dtos/register-to-event.dto';
 import { TransferEventDto } from './dtos/transfer-event.dto';
 import { FindRegistrationDto } from './dtos/find-registration.dto';
@@ -255,6 +256,25 @@ export class EventsController {
     @Body() dto: UpdateEventBrandingDto,
   ) {
     return await this.svc.updateBranding(eventId, dto);
+  }
+
+  // Activa/desactiva la sección de certificados del evento (dueñ@ del evento)
+  @Patch(':eventId/certificates-config')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async updateCertificatesConfig(
+    @Param('eventId') eventId: string,
+    @Body() dto: UpdateCertificatesConfigDto,
+  ) {
+    return await this.svc.updateCertificatesConfig(eventId, dto.enabled);
+  }
+
+  // Resuelve si el attendee puede descargar su certificado y el link (público)
+  @Get(':eventId/certificate-link')
+  async getCertificateLink(
+    @Param('eventId') eventId: string,
+    @Query('attendeeId') attendeeId: string,
+  ) {
+    return await this.svc.getCertificateLink(eventId, attendeeId);
   }
 
   // Sube imágenes para branding del evento (dueñ@ del evento)

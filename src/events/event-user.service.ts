@@ -238,6 +238,18 @@ export class EventUserService {
   // (playbackLiveSeconds > 0), NO solo presencia. Antes se basaba en presencia
   // (wasLiveDuringSession), lo que hacía que este conteo fuera mayor que el
   // "Vieron en vivo" del informe. Se alineó a reproducción real.
+  // Chequeo puntual del mismo criterio que getLiveAttendees, para un solo
+  // eventUser (usado por el gate de descarga de certificados).
+  async hasAttendedLive(
+    eventId: string,
+    eventUserId: string,
+  ): Promise<boolean> {
+    const session = await this.viewingSessionModel
+      .exists({ eventId, eventUserId, playbackLiveSeconds: { $gt: 0 } })
+      .exec();
+    return !!session;
+  }
+
   async getLiveAttendees(eventId: string): Promise<any[]> {
     // Solo sesiones con reproducción real en vivo. El conjunto de EventUsers
     // distintos resultante coincide con liveViewers del informe (quien tiene

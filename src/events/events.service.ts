@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-floating-promises */
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-base-to-string */
@@ -15,7 +14,11 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import { Event, EventDocument } from './schemas/event.schema';
+import {
+  Event,
+  EventDocument,
+  EventCertificatesConfig,
+} from './schemas/event.schema';
 import { EventUser } from './schemas/event-user.schema';
 import { ViewingSession } from './schemas/viewing-session.schema';
 import { EventMetrics } from './schemas/event-metrics.schema';
@@ -37,6 +40,7 @@ import { LiveConfigService } from '../livekit/live-config.service';
 import { EmailSendService } from '../event-email/email-send.service';
 import { EventEmailTemplateService } from '../event-email/event-email-template.service';
 import { EmailCampaignService } from '../email-campaign/email-campaign.service';
+import { CertificatesService } from '../certificates/certificates.service';
 
 function normalizeByType(value: any, type: FormFieldType | undefined) {
   if (value === null || value === undefined) return value;
@@ -176,8 +180,10 @@ export class EventsService implements OnModuleInit {
     @Inject(Organization.name) private orgModel: Model<OrganizationDocument>,
     @InjectModel(EventUser.name) private eventUserModel: Model<EventUser>,
     @InjectModel(OrgAttendee.name) private orgAttendeeModel: Model<OrgAttendee>,
-    @InjectModel(ViewingSession.name) private viewingSessionModel: Model<ViewingSession>,
-    @InjectModel(EventMetrics.name) private eventMetricsModel: Model<EventMetrics>,
+    @InjectModel(ViewingSession.name)
+    private viewingSessionModel: Model<ViewingSession>,
+    @InjectModel(EventMetrics.name)
+    private eventMetricsModel: Model<EventMetrics>,
     @InjectModel(Poll.name) private pollModel: Model<Poll>,
     private rtdb: RtdbService,
     private watcher: RtdbPresenceWatcherService,
@@ -187,6 +193,7 @@ export class EventsService implements OnModuleInit {
     private emailSendService: EmailSendService,
     private emailTemplateService: EventEmailTemplateService,
     private emailCampaignService: EmailCampaignService,
+    private certificatesService: CertificatesService,
   ) {
     // Configurar watcher con servicio de métricas para evitar dependencia circular
     this.watcher.setViewingMetricsService(this.metricsService);
@@ -376,7 +383,8 @@ export class EventsService implements OnModuleInit {
     );
     const especField = pickField(
       (id, label) =>
-        /especialidad|specialty/.test(id) || /especialidad|specialty/.test(label),
+        /especialidad|specialty/.test(id) ||
+        /especialidad|specialty/.test(label),
     );
 
     const total = await this.orgAttendeeModel.countDocuments({
@@ -446,7 +454,9 @@ export class EventsService implements OnModuleInit {
       // por la opción canónica del campo. Devuelve el mapa fusionado + sin-valor.
       const aggregateBy = async (extraMatch: Record<string, unknown>) => {
         const rows = await this.orgAttendeeModel.aggregate([
-          { $match: { organizationId: orgId, eventIds: eventId, ...extraMatch } },
+          {
+            $match: { organizationId: orgId, eventIds: eventId, ...extraMatch },
+          },
           {
             $group: {
               _id: { $ifNull: [`$registrationData.${fieldId}`, null] },
@@ -471,7 +481,8 @@ export class EventsService implements OnModuleInit {
           const mergeKey = norm(canonicalValue);
           const existing = counts.get(mergeKey);
           if (existing) existing.count += row.count;
-          else counts.set(mergeKey, { value: canonicalValue, count: row.count });
+          else
+            counts.set(mergeKey, { value: canonicalValue, count: row.count });
         }
         return { counts, unknown };
       };
@@ -641,9 +652,7 @@ export class EventsService implements OnModuleInit {
    * para un conjunto de organizaciones, resuelto en una sola consulta.
    * Devuelve un mapa orgId(string) → datos mínimos del evento.
    */
-  async nextUpcomingByOrgIds(
-    orgIds: Types.ObjectId[],
-  ): Promise<
+  async nextUpcomingByOrgIds(orgIds: Types.ObjectId[]): Promise<
     Record<
       string,
       {
@@ -697,7 +706,7 @@ export class EventsService implements OnModuleInit {
       return this.model
         .find({ orgId: objectId, hidden: { $ne: true } })
         .select(
-          'slug title description status schedule stream branding createdAt',
+          'slug title description status schedule stream branding certificatesConfig createdAt',
         )
         .sort({ createdAt: -1 })
         .lean();
@@ -740,7 +749,10 @@ export class EventsService implements OnModuleInit {
         }),
       ),
     ).catch((err) =>
-      this.logger.error('Error seeding default email templates:', err?.message ?? err),
+      this.logger.error(
+        'Error seeding default email templates:',
+        err?.message ?? err,
+      ),
     );
 
     return event;
@@ -905,9 +917,20 @@ export class EventsService implements OnModuleInit {
    * 1. Crea o actualiza el OrgAttendee
    * 2. Crea el EventUser vinculándolo al evento
    */
-  async registerUserToEvent(eventId: string, dto: RegisterToEventDto, origin?: string) {
+  async registerUserToEvent(
+    eventId: string,
+    dto: RegisterToEventDto,
+    origin?: string,
+  ) {
     // Verificar que el evento existe y obtener orgId
-    const event = await this.model.findById(eventId, { orgId: 1 }).lean();
+    const event = await this.model
+      .findById(eventId, {
+        orgId: 1,
+        title: 1,
+        schedule: 1,
+        certificatesConfig: 1,
+      })
+      .lean();
     if (!event) throw new NotFoundException('Event not found');
 
     const organizationId = event.orgId;
@@ -970,7 +993,89 @@ export class EventsService implements OnModuleInit {
         this.logger.error('Welcome email failed:', err?.message ?? err),
       );
 
+    // Fire-and-forget: sincroniza el asistente con el sistema externo de
+    // certificados. No debe bloquear ni poder fallar el registro al evento.
+    if (event.certificatesConfig?.enabled && !eventUser.certificateAttendeeId) {
+      this.syncCertificateForEventUser(
+        eventId,
+        event,
+        organizationId,
+        eventUser,
+        attendee,
+      ).catch((err) =>
+        this.logger.error('Certificate sync failed:', err?.message ?? err),
+      );
+    }
+
     return { attendee, eventUser };
+  }
+
+  /**
+   * Sincroniza un EventUser recién (re)registrado con el backend externo de
+   * certificados: aprovisiona Event/Organization de certificados si hace
+   * falta y crea/actualiza el Attendee allá, guardando los ids resultantes.
+   */
+  private async syncCertificateForEventUser(
+    eventId: string,
+    event: {
+      title?: string;
+      schedule?: { startsAt?: Date; endsAt?: Date };
+      certificatesConfig?: EventCertificatesConfig;
+    },
+    organizationId: any,
+    eventUser: any,
+    attendee: any,
+  ) {
+    let certOrganizationId = event.certificatesConfig?.certOrganizationId;
+    let certEventId = event.certificatesConfig?.certEventId;
+
+    if (!certOrganizationId || !certEventId) {
+      const org = await this.orgModel
+        .findById(organizationId, { name: 1 })
+        .lean();
+      const provisioned = await this.certificatesService.ensureProvisioned(
+        {
+          orgName: org?.name || 'Organización',
+          eventTitle: event.title || 'Evento',
+          startsAt: event.schedule?.startsAt,
+          endsAt: event.schedule?.endsAt,
+        },
+        { certOrganizationId, certEventId },
+      );
+      if (!provisioned) return;
+
+      certOrganizationId = provisioned.certOrganizationId;
+      certEventId = provisioned.certEventId;
+      await this.model.findByIdAndUpdate(eventId, {
+        certificatesConfig: {
+          ...(event.certificatesConfig || {}),
+          enabled: true,
+          certOrganizationId,
+          certEventId,
+        },
+      });
+    }
+
+    const result = await this.certificatesService.syncAttendee({
+      certEventId,
+      certOrganizationId,
+      email: attendee.email,
+      name: attendee.name,
+    });
+
+    if (result) {
+      await this.eventUserModel.findByIdAndUpdate(eventUser._id, {
+        certificateAttendeeId: result.certificateAttendeeId,
+        certificateMemberId: result.certificateMemberId,
+        certificateSyncedAt: new Date(),
+        certificateSyncError: null,
+      });
+    } else {
+      await this.eventUserModel.findByIdAndUpdate(eventUser._id, {
+        certificateSyncError:
+          'Fallo al sincronizar con backend de certificados',
+      });
+    }
   }
 
   /**
@@ -1526,6 +1631,123 @@ export class EventsService implements OnModuleInit {
   }
 
   /**
+   * Activa/desactiva la sección de certificados del evento. Al activar,
+   * aprovisiona de inmediato el Event/Organization en el backend externo de
+   * certificados si aún no existen (feedback rápido al admin).
+   */
+  async updateCertificatesConfig(eventId: string, enabled: boolean) {
+    const event = await this.model.findById(eventId).lean();
+    if (!event) {
+      throw new NotFoundException('Event not found');
+    }
+
+    let certificatesConfig: EventCertificatesConfig = {
+      ...(event.certificatesConfig || { enabled: false }),
+      enabled,
+    };
+
+    if (
+      enabled &&
+      (!certificatesConfig.certOrganizationId ||
+        !certificatesConfig.certEventId)
+    ) {
+      const org = await this.orgModel.findById(event.orgId, { name: 1 }).lean();
+      const provisioned = await this.certificatesService.ensureProvisioned(
+        {
+          orgName: org?.name || 'Organización',
+          eventTitle: event.title,
+          startsAt: event.schedule?.startsAt,
+          endsAt: event.schedule?.endsAt,
+        },
+        certificatesConfig,
+      );
+      if (provisioned) {
+        certificatesConfig = { ...certificatesConfig, ...provisioned };
+      }
+    }
+
+    return await this.model
+      .findByIdAndUpdate(eventId, { certificatesConfig }, { new: true })
+      .lean();
+  }
+
+  /**
+   * Resuelve el link de descarga del certificado para un attendee, aplicando
+   * ambos gates del lado del servidor: toggle habilitado + asistencia real en
+   * vivo (playbackLiveSeconds > 0, mismo criterio que getLiveAttendees).
+   */
+  async getCertificateLink(eventId: string, attendeeId: string) {
+    const event = await this.model
+      .findById(eventId, { certificatesConfig: 1 })
+      .lean();
+
+    if (!event?.certificatesConfig?.enabled) {
+      return { allowed: false, reason: 'disabled' };
+    }
+
+    const eventUser = await this.eventUserModel
+      .findOne({ eventId, attendeeId })
+      .lean();
+
+    if (!eventUser) {
+      return { allowed: false, reason: 'not_registered' };
+    }
+
+    let certificateAttendeeId = eventUser.certificateAttendeeId;
+    let certificateMemberId = eventUser.certificateMemberId;
+
+    if (
+      (!certificateAttendeeId || !certificateMemberId) &&
+      event.certificatesConfig.certOrganizationId &&
+      event.certificatesConfig.certEventId
+    ) {
+      // Self-heal: reintenta una vez por si el backend de certificados
+      // estaba caído en el momento del registro original.
+      const attendee = await this.orgAttendeeModel.findById(attendeeId).lean();
+      if (attendee) {
+        const result = await this.certificatesService.syncAttendee({
+          certEventId: event.certificatesConfig.certEventId,
+          certOrganizationId: event.certificatesConfig.certOrganizationId,
+          email: attendee.email,
+          name: attendee.name,
+        });
+        if (result) {
+          certificateAttendeeId = result.certificateAttendeeId;
+          certificateMemberId = result.certificateMemberId;
+          await this.eventUserModel.findByIdAndUpdate(eventUser._id, {
+            certificateAttendeeId,
+            certificateMemberId,
+            certificateSyncedAt: new Date(),
+            certificateSyncError: null,
+          });
+        }
+      }
+    }
+
+    if (!certificateAttendeeId || !certificateMemberId) {
+      return { allowed: false, reason: 'not_synced' };
+    }
+
+    const attendedLive = await this.viewingSessionModel.exists({
+      eventId,
+      eventUserId: eventUser._id,
+      playbackLiveSeconds: { $gt: 0 },
+    });
+
+    if (!attendedLive) {
+      return { allowed: false, reason: 'did_not_attend_live' };
+    }
+
+    return {
+      allowed: true,
+      url: this.certificatesService.buildCertificateUrl(
+        certificateAttendeeId,
+        certificateMemberId,
+      ),
+    };
+  }
+
+  /**
    * Reset de emergencia: limpia estado cuando LiveKit falla o se desincroniza
    * - Detiene egress en LiveKit si existe
    * - Elimina config de DB
@@ -1620,7 +1842,7 @@ export class EventsService implements OnModuleInit {
       .lean();
     if (!event) throw new NotFoundException('Event not found');
 
-    const slug = event.slug as string;
+    const slug = event.slug;
     const oidStr = new Types.ObjectId(eventId);
 
     await Promise.all([
