@@ -1903,7 +1903,7 @@ export class EventsService implements OnModuleInit {
     return {
       allowed: true,
       url: this.certificatesService.buildCertificateUrl(
-        certificateAttendeeId,
+        event.certificatesConfig.certEventId!,
         certificateMemberId,
       ),
     };

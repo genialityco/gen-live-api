@@ -207,10 +207,12 @@ export class CertificatesService {
     return status ? `[${status}] ${message}` : message;
   }
 
-  buildCertificateUrl(
-    certificateAttendeeId: string,
-    certificateMemberId: string,
-  ) {
-    return `${this.frontendUrl}/certificate/${certificateAttendeeId}/${certificateMemberId}`;
+  // La ruta real en certificate-app es /certificate/:certificateId/:attendeeId
+  // (Routes.tsx) — el primer segmento se usa como eventId (GenerateCertificate
+  // intenta resolverlo como Certificate template; si no existe, lo usa
+  // directo como eventId), y el segundo como filtro member/userId sobre
+  // Attendee. Por eso va certEventId primero, NO el _id del Attendee.
+  buildCertificateUrl(certEventId: string, certificateMemberId: string) {
+    return `${this.frontendUrl}/certificate/${certEventId}/${certificateMemberId}`;
   }
 }
