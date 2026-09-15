@@ -23,6 +23,7 @@ export class PublicController {
         provider: ev.stream?.provider ?? null,
         url: ev.stream?.url ?? null,
       },
+      streams: ev.streams ?? [],
       status: ev.status,
       orgId: String(ev.orgId),
     };

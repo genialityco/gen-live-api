@@ -1,8 +1,8 @@
 import { IsIn, IsOptional, IsString, IsUrl } from 'class-validator';
 
 export class UpdateStreamDto {
-  @IsIn(['vimeo', 'mux'])
-  provider!: 'vimeo' | 'mux';
+  @IsIn(['vimeo', 'mux', 'cloudflare'])
+  provider!: 'vimeo' | 'mux' | 'cloudflare';
 
   @IsString()
   @IsUrl({ require_tld: false }) // permite localhost si lo usaras

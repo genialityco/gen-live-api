@@ -26,6 +26,7 @@ import { CreateEventDto } from './dtos/create-event.dto';
 import { UpdateEventDto } from './dtos/update-event.dto';
 import { UpdateStatusDto } from './dtos/update-status.dto';
 import { UpdateStreamDto } from './dtos/update-stream.dto';
+import { UpdateStreamsDto } from './dtos/update-streams.dto';
 import { UpdateEmergencyModeDto } from './dtos/update-emergency-mode.dto';
 import { UpdateEventBrandingDto } from './dtos/update-event-branding.dto';
 import { UpdateCertificatesConfigDto } from './dtos/update-certificates-config.dto';
@@ -236,6 +237,16 @@ export class EventsController {
     @Body() dto: UpdateStreamDto,
   ) {
     return this.svc.updateStream(eventId, dto);
+  }
+
+  // Reemplaza el arreglo de fuentes de repetición (vimeo, bunny, etc.)
+  @Patch(':eventId/streams')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async setStreams(
+    @Param('eventId') eventId: string,
+    @Body() dto: UpdateStreamsDto,
+  ) {
+    return this.svc.updateStreams(eventId, dto.streams);
   }
 
   // Toggle de "modo emergencia" (dueñ@ del evento) — ver plan modo emergencia.

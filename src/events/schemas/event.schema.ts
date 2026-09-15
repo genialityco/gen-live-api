@@ -82,6 +82,25 @@ export class Event {
     provider?: string;
   };
 
+  // Lista de proveedores de video configurados para el evento (vimeo, bunny,
+  // cloudflare, mux, etc.). No reemplaza a `stream` (que sigue siendo el
+  // usado por el resto del código); es un campo nuevo y aditivo.
+  @Prop({
+    type: [
+      {
+        provider: { type: String },
+        url: { type: String },
+        meta: { type: Object },
+      },
+    ],
+    default: [],
+  })
+  streams?: Array<{
+    provider?: string;
+    url?: string;
+    meta?: Record<string, any>;
+  }>;
+
   @Prop({ type: Date })
   endedAt?: Date;
 

@@ -20,18 +20,21 @@ export class LiveController {
 
   @Post('start')
   async start(@Body() body: { eventSlug: string }) {
+    console.log(`📥 [live] POST /live/start eventSlug=${body.eventSlug}`);
     const info = await this.egress.startEgress(body.eventSlug);
     return { egressId: info.egressId, status: info.status };
   }
 
   @Post('start-rtmp')
   async startRtmp(@Body() body: { eventSlug: string }) {
+    console.log(`📥 [live] POST /live/start-rtmp eventSlug=${body.eventSlug}`);
     const info = await this.egress.startEgress(body.eventSlug);
     return { egressId: info.egressId, status: info.status };
   }
 
   @Post('stop')
   async stop(@Body() body: { egressId: string }) {
+    console.log(`📥 [live] POST /live/stop egressId=${body.egressId}`);
     const info = await this.egress.stopEgress(body.egressId);
     return { egressId: info.egressId, status: info.status };
   }

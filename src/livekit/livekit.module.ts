@@ -15,6 +15,7 @@ import { MediaLibraryController } from './media-library.controller';
 import { RtdbModule } from 'src/rtdb/rtdb.module';
 import { EventsModule } from 'src/events/events.module';
 import { MuxService } from './mux.service';
+import { CloudflareStreamService } from './cloudflare-stream.service';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { MuxService } from './mux.service';
     LivekitEgressService,
     LiveConfigService,
     MuxService,
+    CloudflareStreamService,
     MediaLibraryService,
   ],
   controllers: [LivekitController, LiveController, MediaLibraryController],
@@ -38,6 +40,7 @@ import { MuxService } from './mux.service';
     LivekitEgressService,
     LiveConfigService,
     MuxService,
+    CloudflareStreamService,
     MediaLibraryService,
   ],
 })

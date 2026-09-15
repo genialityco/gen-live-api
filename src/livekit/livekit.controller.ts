@@ -24,6 +24,7 @@ import { IsIn, IsOptional, IsString } from 'class-validator';
 import { LivekitService } from './livekit.service';
 import { LiveConfigService } from './live-config.service';
 import { MuxService } from './mux.service';
+import { CloudflareStreamService } from './cloudflare-stream.service';
 import { EventsService } from '../events/events.service';
 import { FirebaseAuthGuard } from 'src/common/guards/firebase-auth.guard';
 import * as admin from 'firebase-admin';
@@ -58,6 +59,7 @@ export class LivekitController {
     private readonly livekitService: LivekitService,
     private readonly liveConfig: LiveConfigService,
     private readonly muxService: MuxService,
+    private readonly cloudflareStreamService: CloudflareStreamService,
     @Inject('RTDB') private readonly rtdb: admin.database.Database,
     @Inject('FIREBASE_ADMIN') private readonly firebaseAdmin: typeof admin,
     @Inject(forwardRef(() => EventsService))
@@ -99,7 +101,8 @@ export class LivekitController {
   /**
    * POST /livekit/provision
    * Provisiona o re-provisiona un live event con Mux via API.
-   * Para Vimeo, las credenciales se ingresan manualmente en PUT /livekit/config.
+   * Para Vimeo y Cloudflare Stream, las credenciales se ingresan
+   * manualmente en PUT /livekit/config.
    */
   @Post('provision')
   async provision(
@@ -114,7 +117,7 @@ export class LivekitController {
 
     if (body.provider !== 'mux') {
       throw new BadRequestException(
-        'Solo Mux se auto-provisiona. Para Vimeo, ingresa las credenciales manualmente en la configuración.',
+        'Solo Mux se auto-provisiona. Para Vimeo y Cloudflare Stream, ingresa las credenciales manualmente en la configuración.',
       );
     }
 
@@ -129,6 +132,20 @@ export class LivekitController {
       playbackHlsUrl: m.playbackHlsUrl,
       lastError: '',
     });
+
+    // Sync estudio→evento: al auto-provisionar (crear) el live stream de Mux
+    // también refleja el playbackHlsUrl en event.stream/event.streams (ver
+    // setConfig más abajo, misma lógica para la vía de edición manual).
+    if (m.playbackHlsUrl) {
+      try {
+        await this.eventsService.syncStreamFromStudio(body.eventSlug, {
+          url: m.playbackHlsUrl,
+          provider: 'mux',
+        });
+      } catch {
+        // No bloquear el aprovisionamiento si el sync al evento falla
+      }
+    }
 
     return {
       ok: true,
@@ -179,11 +196,14 @@ export class LivekitController {
     // respeta la fase (solo upcoming/live) para no pisar la URL de replay.
     if (allowSecrets && typeof patch.playbackHlsUrl === 'string' && patch.playbackHlsUrl) {
       const url: string = patch.playbackHlsUrl;
-      const provider: 'vimeo' | 'mux' | 'gcore' = /vimeo\.com/i.test(url)
-        ? 'vimeo'
-        : /gvideo\.(co|io)/i.test(url)
-          ? 'gcore'
-          : 'mux';
+      const provider: 'vimeo' | 'mux' | 'gcore' | 'cloudflare' =
+        /vimeo\.com/i.test(url)
+          ? 'vimeo'
+          : /gvideo\.(co|io)/i.test(url)
+            ? 'gcore'
+            : /cloudflarestream\.com/i.test(url)
+              ? 'cloudflare'
+              : 'mux';
       try {
         await this.eventsService.syncStreamFromStudio(body.eventSlug, {
           url,
@@ -632,50 +652,67 @@ export class LivekitController {
   }
 
   /**
+   * Devuelve el servicio de proveedor de grabaciones/replay (Mux o Cloudflare
+   * Stream) según el provider configurado para el evento, o null si el
+   * provider actual no soporta consulta de replays (p.ej. Vimeo/Gcore).
+   */
+  private replayProviderFor(
+    provider: string,
+  ): MuxService | CloudflareStreamService | null {
+    if (provider === 'mux') return this.muxService;
+    if (provider === 'cloudflare') return this.cloudflareStreamService;
+    return null;
+  }
+
+  /**
    * GET /livekit/replay?eventSlug=xxx
-   * Obtiene la URL de repetición del live stream (solo Mux).
-   * Mux crea automáticamente un Asset (video grabado) cuando termina el stream.
+   * Obtiene la URL de repetición del live stream (Mux o Cloudflare Stream).
+   * Ambos generan automáticamente una grabación cuando termina el stream.
    */
   @Get('replay')
   async getReplayUrl(@Query('eventSlug') eventSlug: string) {
     if (!eventSlug) throw new BadRequestException('eventSlug requerido');
 
     const cfg = await this.liveConfig.get(eventSlug);
+    const provider = this.replayProviderFor(cfg.provider);
 
-    if (!cfg.providerStreamId || cfg.provider !== 'mux') {
+    if (!cfg.providerStreamId || !provider) {
       return {
         ok: false,
         status: 'not_available',
-        message: 'Este evento no tiene un stream de Mux provisionado.',
+        message:
+          'Este evento no tiene un stream de Mux o Cloudflare Stream provisionado.',
       };
     }
 
-    const result = await this.muxService.getReplayUrl(cfg.providerStreamId);
+    const result = await provider.getReplayUrl(cfg.providerStreamId);
     return {
       ok: result.status === 'ready',
-      provider: 'mux',
+      provider: cfg.provider,
       ...result,
     };
   }
 
   /**
    * GET /livekit/stream-info?eventSlug=xxx
-   * Obtiene información del live stream de Mux (status, assets, etc.)
+   * Obtiene información del live stream (Mux o Cloudflare Stream).
    */
   @Get('stream-info')
   async getStreamInfo(@Query('eventSlug') eventSlug: string) {
     if (!eventSlug) throw new BadRequestException('eventSlug requerido');
 
     const cfg = await this.liveConfig.get(eventSlug);
+    const provider = this.replayProviderFor(cfg.provider);
 
-    if (cfg.provider !== 'mux' || !cfg.providerStreamId) {
+    if (!provider || !cfg.providerStreamId) {
       return {
         ok: false,
-        message: 'No hay stream de Mux configurado para este evento.',
+        message:
+          'No hay stream de Mux o Cloudflare Stream configurado para este evento.',
       };
     }
 
-    const info = await this.muxService.getLiveStreamInfo(cfg.providerStreamId);
+    const info = await provider.getLiveStreamInfo(cfg.providerStreamId);
 
     if (!info) {
       return {
@@ -692,24 +729,26 @@ export class LivekitController {
 
   /**
    * GET /livekit/assets?eventSlug=xxx
-   * Lista todas las grabaciones (assets) disponibles para un evento (solo Mux).
+   * Lista todas las grabaciones disponibles para un evento (Mux o Cloudflare Stream).
    */
   @Get('assets')
   async listAssets(@Query('eventSlug') eventSlug: string) {
     if (!eventSlug) throw new BadRequestException('eventSlug requerido');
 
     const cfg = await this.liveConfig.get(eventSlug);
+    const provider = this.replayProviderFor(cfg.provider);
 
-    if (!cfg.providerStreamId || cfg.provider !== 'mux') {
+    if (!cfg.providerStreamId || !provider) {
       return {
         ok: false,
         assets: [],
-        message: 'Este evento no tiene un stream de Mux provisionado.',
+        message:
+          'Este evento no tiene un stream de Mux o Cloudflare Stream provisionado.',
       };
     }
 
-    const result = await this.muxService.listAssets(cfg.providerStreamId);
-    return { ok: true, provider: 'mux', ...result };
+    const result = await provider.listAssets(cfg.providerStreamId);
+    return { ok: true, provider: cfg.provider, ...result };
   }
 
   /**
@@ -724,18 +763,18 @@ export class LivekitController {
     if (!eventSlug) throw new BadRequestException('eventSlug requerido');
     if (!assetId) throw new BadRequestException('assetId requerido');
 
-    // Verificar que el evento usa Mux
     const cfg = await this.liveConfig.get(eventSlug);
+    const provider = this.replayProviderFor(cfg.provider);
 
-    if (cfg.provider !== 'mux') {
+    if (!provider) {
       return {
         ok: false,
         status: 'not_available',
-        message: 'Este evento no usa Mux como proveedor.',
+        message: 'Este evento no usa Mux ni Cloudflare Stream como proveedor.',
       };
     }
 
-    const result = await this.muxService.getReplayUrlByAssetId(assetId);
+    const result = await provider.getReplayUrlByAssetId(assetId);
 
     return {
       ok: result.status === 'ready',

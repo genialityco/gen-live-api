@@ -30,7 +30,12 @@ export class LivekitEgressService {
     this.wsUrl = wsUrl;
 
     const host = wsUrl.replace(/^wss?:\/\//, 'https://');
-    this.egressClient = new EgressClient(host, apiKey, apiSecret);
+    // Default requestTimeout del SDK es 10s; StartRoomCompositeEgress puede
+    // tardar más en responder (crea el egress worker, se suscribe a la room)
+    // y con 3 regiones de failover eso agota los 10s antes de completar.
+    this.egressClient = new EgressClient(host, apiKey, apiSecret, {
+      requestTimeout: 30,
+    });
   }
 
   roomName(eventSlug: string) {
@@ -76,8 +81,22 @@ export class LivekitEgressService {
   }
 
   async startEgress(eventSlug: string) {
+    console.log(`🔎 [egress] startEgress() called for eventSlug=${eventSlug}`);
+
     const cfg = await this.liveConfig.getOrCreate(eventSlug);
     const roomName = this.roomName(eventSlug);
+
+    console.log('🔎 [egress] config cargado:', {
+      eventSlug,
+      provider: cfg.provider,
+      ingestProtocol: cfg.ingestProtocol,
+      status: cfg.status,
+      providerStreamId: cfg.providerStreamId,
+      rtmpServerUrl: cfg.rtmpServerUrl,
+      rtmpStreamKey: cfg.rtmpStreamKey,
+      srtIngestUrl: cfg.srtIngestUrl,
+      playbackHlsUrl: cfg.playbackHlsUrl,
+    });
 
     const output = new StreamOutput();
 
@@ -92,18 +111,31 @@ export class LivekitEgressService {
 
         const rtmpUrl = `${base}/${key}`;
 
+        console.log('🔎 [egress] URL RTMP/RTMPS construida:', {
+          eventSlug,
+          rtmpServerUrl: base,
+          rtmpStreamKey: key,
+          rtmpUrlCompleta: rtmpUrl,
+          scheme: rtmpUrl.split('://')[0],
+        });
+
         output.protocol = StreamProtocol.RTMP;
         output.urls = [rtmpUrl];
       } else {
         if (!cfg.srtIngestUrl) {
           throw new BadRequestException('SRT no configurado para este evento');
         }
+        console.log('🔎 [egress] URL SRT:', {
+          eventSlug,
+          srtIngestUrl: cfg.srtIngestUrl,
+        });
         output.protocol = StreamProtocol.SRT;
         output.urls = [cfg.srtIngestUrl];
       }
 
       // Generar token para el egress template
       const egressToken = await this.createEgressToken(roomName);
+      console.log('🔎 [egress] Token del template generado, len=', egressToken.length);
 
       const opts = this.buildOpts(cfg.layout, eventSlug, egressToken);
 
@@ -113,17 +145,25 @@ export class LivekitEgressService {
         opts,
       });
 
+      const startedAt = Date.now();
+      console.log(
+        `🔎 [egress] Llamando egressClient.startRoomCompositeEgress() a las ${new Date(startedAt).toISOString()} (host=${this.wsUrl})`,
+      );
+
       const info = await this.egressClient.startRoomCompositeEgress(
         roomName,
         output,
         opts,
       );
 
-      console.log('✅ Egress started:', {
-        egressId: info.egressId,
-        status: info.status,
-        roomName: info.roomName,
-      });
+      console.log(
+        `✅ Egress started (tardó ${Date.now() - startedAt}ms):`,
+        {
+          egressId: info.egressId,
+          status: info.status,
+          roomName: info.roomName,
+        },
+      );
 
       await this.liveConfig.update(eventSlug, {
         status: 'starting',
@@ -135,9 +175,15 @@ export class LivekitEgressService {
     } catch (e: any) {
       console.log('❌ Error starting egress:', {
         eventSlug,
+        provider: cfg.provider,
+        ingestProtocol: cfg.ingestProtocol,
+        rtmpServerUrl: cfg.rtmpServerUrl,
+        rtmpStreamKey: cfg.rtmpStreamKey,
         error: e?.message,
+        name: e?.name,
         code: e?.code,
         status: e?.status,
+        stack: e?.stack,
       });
       await this.liveConfig.update(eventSlug, {
         status: 'failed',

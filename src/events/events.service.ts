@@ -706,7 +706,7 @@ export class EventsService implements OnModuleInit {
       return this.model
         .find({ orgId: objectId, hidden: { $ne: true } })
         .select(
-          'slug title description status schedule stream branding certificatesConfig createdAt',
+          'slug title description status schedule stream streams branding certificatesConfig createdAt',
         )
         .sort({ createdAt: -1 })
         .lean();
@@ -760,7 +760,11 @@ export class EventsService implements OnModuleInit {
 
   async updateStream(
     eventId: string,
-    payload: { provider: 'vimeo' | 'mux'; url: string; meta?: any },
+    payload: {
+      provider: 'vimeo' | 'mux' | 'cloudflare';
+      url: string;
+      meta?: any;
+    },
   ) {
     const ev = await this.model
       .findByIdAndUpdate(
@@ -799,24 +803,54 @@ export class EventsService implements OnModuleInit {
   }
 
   /**
+   * Reemplaza el arreglo `streams` (fuentes alternas para la repetición:
+   * vimeo, bunny, etc.). No toca `stream` (la URL en vivo sincronizada con
+   * el estudio) ni el sync con `liveConfigService`.
+   */
+  async updateStreams(
+    eventId: string,
+    streams: Array<{ provider: string; url: string; meta?: any }>,
+  ) {
+    const ev = await this.model
+      .findByIdAndUpdate(eventId, { streams }, { new: true })
+      .lean();
+    if (!ev) throw new NotFoundException('Event not found');
+    return ev;
+  }
+
+  /**
    * Sync estudio→evento: cuando el estudio guarda el `playbackHlsUrl`, reflejarlo
-   * en `event.stream` para que el endpoint público y el resto de consumidores
-   * queden coherentes.
+   * en `event.stream` (legacy) y también en `event.streams` para que el
+   * selector de fuentes quede al día. Solo se sobreescribe la entrada de
+   * `streams` que coincide con el proveedor detectado (vimeo/mux/gcore/
+   * cloudflare); las demás fuentes (p. ej. una repetición de bunny) quedan
+   * intactas.
    * Respeta la fase: el filtro de status garantiza que solo se actualiza en
    * upcoming/live, así no se pisa la URL de repetición (replay/ended).
    */
   async syncStreamFromStudio(
     eventSlug: string,
-    payload: { url: string; provider: 'vimeo' | 'mux' | 'gcore' },
+    payload: { url: string; provider: 'vimeo' | 'mux' | 'gcore' | 'cloudflare' },
   ) {
     if (!eventSlug || !payload.url) return null;
+    const filter = { slug: eventSlug, status: { $in: ['upcoming', 'live'] } };
+
+    // Quita cualquier entrada previa de este proveedor en `streams` antes de
+    // agregar la actualizada, para no dejar duplicados al sobreescribir.
+    await this.model.updateOne(filter, {
+      $pull: { streams: { provider: payload.provider } },
+    });
+
     const ev = await this.model
       .findOneAndUpdate(
-        { slug: eventSlug, status: { $in: ['upcoming', 'live'] } },
+        filter,
         {
           $set: {
             'stream.provider': payload.provider,
             'stream.url': payload.url,
+          },
+          $push: {
+            streams: { provider: payload.provider, url: payload.url },
           },
         },
         { new: true },
