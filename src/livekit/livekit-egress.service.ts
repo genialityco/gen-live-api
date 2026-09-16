@@ -60,7 +60,14 @@ export class LivekitEgressService {
   }
 
   private buildOpts(
-    layout: 'grid' | 'speaker' | 'presentation' | 'pip' | 'side_by_side' | 'solo',
+    layout:
+      | 'grid'
+      | 'speaker'
+      | 'presentation'
+      | 'pip'
+      | 'pip_center'
+      | 'side_by_side'
+      | 'solo',
     eventSlug: string,
     token: string,
   ): RoomCompositeOptions {

@@ -398,6 +398,18 @@ export class EventsController {
   }
 
   /**
+   * Desglose de asistencia real (en vivo vs. diferido) para la pestaña de
+   * Métricas: cuántos espectadores únicos reprodujeron de verdad el video en
+   * cada fase. Reutiliza el mismo cálculo que ya usa el informe general, pero
+   * expuesto aparte para no cargar campañas de email/WhatsApp en cada refresco.
+   */
+  @Get(':eventId/watch-stats')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async getEventWatchStats(@Param('eventId') eventId: string) {
+    return this.metricsService.getEventWatchStats(eventId);
+  }
+
+  /**
    * Informe global del evento: unifica las métricas de campañas de email y
    * WhatsApp con el engagement / tiempo de visualización de los asistentes.
    * Yuxtaposición (sin atribución canal→asistente).
@@ -435,18 +447,22 @@ export class EventsController {
   async getPublicEventMetrics(@Param('slug') slug: string) {
     const event = await this.svc.bySlug(slug);
     const eventId = String(event._id);
-    const [meta, metricsDoc, concurrentNow, timelines] = await Promise.all([
-      this.svc.getEventReportPublicMeta(eventId),
-      this.metricsService.getEventMetrics(eventId),
-      this.metricsService.getConcurrentViewersFromPresence(eventId),
-      this.svc.getEventTimelines(eventId),
-    ]);
+    const [meta, metricsDoc, concurrentNow, timelines, watchStats] =
+      await Promise.all([
+        this.svc.getEventReportPublicMeta(eventId),
+        this.metricsService.getEventMetrics(eventId),
+        this.metricsService.getConcurrentViewersFromPresence(eventId),
+        this.svc.getEventTimelines(eventId),
+        this.metricsService.getEventWatchStats(eventId),
+      ]);
     return {
       ...meta,
       metrics: {
         currentConcurrentViewers: concurrentNow,
         peakConcurrentViewers: metricsDoc?.peakConcurrentViewers ?? 0,
         totalUniqueViewers: metricsDoc?.totalUniqueViewers ?? 0,
+        liveViewers: watchStats.liveViewers,
+        replayViewers: watchStats.replayViewers,
         lastUpdate: metricsDoc?.lastUpdate
           ? new Date(metricsDoc.lastUpdate).getTime()
           : Date.now(),

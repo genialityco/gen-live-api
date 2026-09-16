@@ -167,7 +167,14 @@ export class LivekitController {
       rtmpStreamKey?: string;
       srtIngestUrl?: string;
       playbackHlsUrl?: string;
-      layout?: 'grid' | 'speaker';
+      layout?:
+        | 'grid'
+        | 'speaker'
+        | 'presentation'
+        | 'pip'
+        | 'pip_center'
+        | 'side_by_side'
+        | 'solo';
       showFrame?: boolean;
       frameUrl?: string;
     },
