@@ -235,15 +235,16 @@ export class LivekitController {
       );
     }
 
-    // MVP: enmascarar secretos para UI
+    // Nota: rtmpStreamKey/srtIngestUrl van sin enmascarar. Esta ruta no tiene
+    // FirebaseAuthGuard, así que cualquiera con el eventSlug puede leerlos.
     return {
       eventSlug: cfg.eventSlug,
       provider: cfg.provider || 'mux',
       providerStreamId: cfg.providerStreamId || '',
       ingestProtocol: cfg.ingestProtocol,
       rtmpServerUrl: cfg.rtmpServerUrl,
-      rtmpStreamKey: cfg.rtmpStreamKey ? '****' : '',
-      srtIngestUrl: cfg.srtIngestUrl ? '****' : '',
+      rtmpStreamKey: cfg.rtmpStreamKey || '',
+      srtIngestUrl: cfg.srtIngestUrl || '',
       playbackHlsUrl: cfg.playbackHlsUrl,
       layout: cfg.layout,
       maxParticipants: cfg.maxParticipants,
