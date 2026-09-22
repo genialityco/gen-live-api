@@ -116,12 +116,26 @@ export class LivekitEgressService {
           throw new BadRequestException('RTMP no configurado para este evento');
         }
 
-        const rtmpUrl = `${base}/${key}`;
+        // Defensivo: si el "stream key" ya viene como una URL RTMP completa
+        // (p.ej. alguien pegó por error la línea entera que Vimeo muestra como
+        // "server + key" combinados), usarla tal cual en vez de concatenarla
+        // con rtmpServerUrl. Concatenar en ese caso produce una URL duplicada
+        // e inválida (rtmp://host/live/rtmp://host/{key}) que el servidor de
+        // destino rechaza cerrando la conexión ('connect' cmd failed).
+        const keyIsFullUrl = /^rtmps?:\/\//i.test(key);
+        const rtmpUrl = keyIsFullUrl ? key : `${base}/${key}`;
+
+        if (keyIsFullUrl) {
+          console.warn(
+            `⚠️ [egress] rtmpStreamKey para eventSlug=${eventSlug} contiene una URL RTMP completa en vez de solo el key; usándola tal cual y omitiendo rtmpServerUrl para evitar una URL duplicada.`,
+          );
+        }
 
         console.log('🔎 [egress] URL RTMP/RTMPS construida:', {
           eventSlug,
           rtmpServerUrl: base,
           rtmpStreamKey: key,
+          keyIsFullUrl,
           rtmpUrlCompleta: rtmpUrl,
           scheme: rtmpUrl.split('://')[0],
         });
