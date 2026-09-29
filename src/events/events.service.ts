@@ -803,9 +803,26 @@ export class EventsService implements OnModuleInit {
   }
 
   /**
+   * RTMP server por defecto de cada proveedor soportado para auto-selección
+   * en el estudio (ver `updateStreams`). Por ahora solo Vimeo y Cloudflare;
+   * el resto de proveedores de `streams` (bunny, other) no tienen un ingest
+   * RTMP propio conocido, así que no disparan el sync.
+   */
+  private static readonly RTMP_SERVER_BY_PROVIDER: Record<string, string> = {
+    vimeo: 'rtmp://rtmp-global.cloud.vimeo.com/live',
+    cloudflare: 'rtmps://live.cloudflare.com:443/live',
+  };
+
+  /**
    * Reemplaza el arreglo `streams` (fuentes alternas para la repetición:
    * vimeo, bunny, etc.). No toca `stream` (la URL en vivo sincronizada con
-   * el estudio) ni el sync con `liveConfigService`.
+   * el estudio).
+   *
+   * Sync evento→estudio: si el primer stream de la lista es Vimeo o
+   * Cloudflare, selecciona ese mismo proveedor en el estudio, precarga su
+   * RTMP server por defecto y copia la URL del stream como `playbackHlsUrl`
+   * (el stream key sigue siendo manual, específico de cada evento). Solo
+   * aplica en upcoming/live, igual que `updateStream`.
    */
   async updateStreams(
     eventId: string,
@@ -815,6 +832,31 @@ export class EventsService implements OnModuleInit {
       .findByIdAndUpdate(eventId, { streams }, { new: true })
       .lean();
     if (!ev) throw new NotFoundException('Event not found');
+
+    const firstProvider = streams[0]?.provider;
+    const firstUrl = streams[0]?.url?.trim();
+    const rtmpServerUrl = firstProvider
+      ? EventsService.RTMP_SERVER_BY_PROVIDER[firstProvider]
+      : undefined;
+
+    if (
+      rtmpServerUrl &&
+      ev.slug &&
+      (ev.status === 'upcoming' || ev.status === 'live')
+    ) {
+      try {
+        await this.liveConfigService.update(ev.slug, {
+          provider: firstProvider as any,
+          rtmpServerUrl,
+          ...(firstUrl ? { playbackHlsUrl: firstUrl } : {}),
+        });
+      } catch (err) {
+        this.logger.warn(
+          `No se pudo sincronizar el provider del estudio para ${ev.slug}: ${String(err)}`,
+        );
+      }
+    }
+
     return ev;
   }
 

@@ -162,6 +162,7 @@ export class LivekitController {
     @Body()
     body: {
       eventSlug: string;
+      provider?: 'vimeo' | 'cloudflare' | 'mux' | 'gcore';
       ingestProtocol?: 'rtmp' | 'srt';
       rtmpServerUrl?: string;
       rtmpStreamKey?: string;
