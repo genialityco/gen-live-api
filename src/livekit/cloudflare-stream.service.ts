@@ -27,8 +27,23 @@ export class CloudflareStreamService {
     return { Authorization: `Bearer ${this.apiToken}` };
   }
 
-  private playbackUrlFor(video: any): string | null {
-    return video?.playback?.hls || null;
+  /**
+   * URL del embed de Cloudflare Stream (`.../{uid}/iframe`), el reproductor
+   * propio de Cloudflare (maneja HLS/buffering del lado de ellos). Se
+   * prefiere sobre la URL del manifest (.../manifest/video.m3u8) para
+   * repeticiones: evita que el visor tenga que lidiar con hls.js directo
+   * contra un VOD de Cloudflare.
+   */
+  private iframeUrlFor(video: any): string | null {
+    const hls = video?.playback?.hls as string | undefined;
+    const uid = video?.uid as string | undefined;
+    if (!hls || !uid) return null;
+    try {
+      const u = new URL(hls);
+      return `${u.protocol}//${u.host}/${uid}/iframe`;
+    } catch {
+      return null;
+    }
   }
 
   private mapVideo(video: any) {
@@ -41,7 +56,7 @@ export class CloudflareStreamService {
           : null,
       createdAt: video.created ?? null,
       playbackId: video.uid ?? null,
-      replayUrl: this.playbackUrlFor(video),
+      replayUrl: this.iframeUrlFor(video),
     };
   }
 
@@ -105,7 +120,18 @@ export class CloudflareStreamService {
         };
       }
 
-      const assets = videos.map((v) => this.mapVideo(v));
+      // La API de Cloudflare no garantiza orden cronológico en `videos` (no
+      // es estrictamente "más viejo primero" ni "más nuevo primero"). Se
+      // ordena explícitamente por fecha de creación, más reciente primero,
+      // para que cualquier consumidor que tome el primer elemento obtenga
+      // siempre la última grabación real, no "la última del array".
+      const assets = videos
+        .map((v) => this.mapVideo(v))
+        .sort((a, b) => {
+          const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+          const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+          return tb - ta;
+        });
 
       return {
         assets,
@@ -137,7 +163,8 @@ export class CloudflareStreamService {
       return { replayUrl: null, assetId: null, status: 'not_available', message };
     }
 
-    const latest = assets[assets.length - 1];
+    // `assets` ya viene ordenado por createdAt descendente (ver listAssets).
+    const latest = assets[0];
 
     if (latest.status !== 'ready') {
       return {

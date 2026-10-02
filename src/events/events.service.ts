@@ -37,6 +37,7 @@ import { UpdateEventBrandingDto } from './dtos/update-event-branding.dto';
 import { ViewingMetricsService } from './viewing-metrics.service.v2';
 import { LivekitEgressService } from '../livekit/livekit-egress.service';
 import { LiveConfigService } from '../livekit/live-config.service';
+import { CloudflareStreamService } from '../livekit/cloudflare-stream.service';
 import { EmailSendService } from '../event-email/email-send.service';
 import { EventEmailTemplateService } from '../event-email/event-email-template.service';
 import { EmailCampaignService } from '../email-campaign/email-campaign.service';
@@ -190,6 +191,7 @@ export class EventsService implements OnModuleInit {
     private metricsService: ViewingMetricsService,
     private livekitEgressService: LivekitEgressService,
     private liveConfigService: LiveConfigService,
+    private cloudflareStreamService: CloudflareStreamService,
     private emailSendService: EmailSendService,
     private emailTemplateService: EventEmailTemplateService,
     private emailCampaignService: EmailCampaignService,
@@ -590,6 +592,28 @@ export class EventsService implements OnModuleInit {
       // Inicializar métricas en RTDB cuando el evento pasa a live
       await this.metricsService.getEventMetrics(eventId);
       this.watcher.watch(eventId);
+
+      // Cloudflare: al pasar a vivo, dejar la URL de stream del evento en la
+      // URL HLS configurada en el estudio. Necesario porque, a diferencia de
+      // Mux/Vimeo, acá el host la pega a mano — y si el evento ya se usó
+      // antes (quedó con la URL de una grabación/diferido anterior), este
+      // paso la vuelve a dejar en la de vivo.
+      if (ev.slug) {
+        try {
+          const cfg = await this.liveConfigService.get(ev.slug);
+          if (cfg.provider === 'cloudflare' && cfg.playbackHlsUrl) {
+            await this.setEventStreamUrl(
+              ev.slug,
+              'cloudflare',
+              cfg.playbackHlsUrl,
+            );
+          }
+        } catch (err) {
+          this.logger.warn(
+            `[cloudflare-live] No se pudo sincronizar la URL de stream para ${ev.slug}: ${String(err)}`,
+          );
+        }
+      }
     } else if (status === 'replay') {
       // Diferido: seguir contabilizando tiempo de visualización, pero on-demand
       // (se auto-desactiva sin audiencia). El tiempo en diferido = total - live.
@@ -610,9 +634,113 @@ export class EventsService implements OnModuleInit {
       await this.metricsService.updateConcurrentViewers(eventId, []);
       // Calcular métricas finales cuando el evento termina
       await this.metricsService.calculateEventMetrics(eventId);
+
+      // Cloudflare: la grabación del live input se genera de forma asíncrona
+      // (no está lista al instante). Buscarla en background y, apenas esté
+      // lista, usarla como URL de stream del evento (fire-and-forget: no debe
+      // bloquear ni fallar la respuesta de setStatus).
+      if (ev.slug) {
+        void this.applyCloudflareReplayWhenReady(ev.slug);
+      }
     }
 
     return { ok: true, eventId, status };
+  }
+
+  /**
+   * Deja `event.stream`/`event.streams` apuntando a `url` para `provider`,
+   * sin el guard de upcoming/live de `syncStreamFromStudio` (acá el cambio
+   * de estado del evento ya es, en sí mismo, la señal de que corresponde
+   * actualizarla). Reemplaza cualquier entrada previa de ese provider en
+   * `streams` para no dejar duplicados.
+   */
+  private async setEventStreamUrl(
+    eventSlug: string,
+    provider: string,
+    url: string,
+  ): Promise<void> {
+    await this.model.updateOne(
+      { slug: eventSlug },
+      { $pull: { streams: { provider } } },
+    );
+    const updated = await this.model
+      .findOneAndUpdate(
+        { slug: eventSlug },
+        {
+          $set: { 'stream.provider': provider, 'stream.url': url },
+          $push: { streams: { provider, url } },
+        },
+        { new: true },
+      )
+      .lean();
+    if (updated) void this.mirrorEmergencyCache(updated);
+  }
+
+  /**
+   * Cuando un evento con provider=cloudflare termina, Cloudflare Stream
+   * genera la grabación (VOD) del live input de forma asíncrona. Reintenta
+   * cada 15s (hasta ~6 min) y, apenas la grabación esté "ready", la deja
+   * como `event.stream`/`event.streams` (la URL que ven los asistentes al
+   * entrar en diferido) — análogo a `syncStreamFromStudio`, pero sin su
+   * guard de upcoming/live porque acá el evento ya está `ended` a propósito.
+   */
+  private async applyCloudflareReplayWhenReady(
+    eventSlug: string,
+    attempt = 0,
+  ): Promise<void> {
+    const MAX_ATTEMPTS = 24; // ~6 minutos con el delay de abajo
+    const RETRY_DELAY_MS = 15_000;
+
+    try {
+      const cfg = await this.liveConfigService.get(eventSlug);
+      if (cfg.provider !== 'cloudflare') return;
+
+      // `providerStreamId` no tiene hoy ningún campo en el estudio que lo
+      // llene correctamente para Cloudflare (a diferencia de Mux, que lo
+      // auto-provisiona) — puede traer basura de otro flujo/provider. Solo
+      // se confía en él si tiene pinta de UID real de Cloudflare (hex de 32);
+      // si no, se extrae de la playbackHlsUrl, que sí es la fuente confiable.
+      const isCloudflareUid = (v?: string | null) =>
+        !!v && /^[a-f0-9]{32}$/i.test(v);
+      const liveInputUid = isCloudflareUid(cfg.providerStreamId)
+        ? cfg.providerStreamId
+        : cfg.playbackHlsUrl?.match(
+            /cloudflarestream\.com\/([a-f0-9]{32})\//,
+          )?.[1];
+
+      if (!liveInputUid) {
+        this.logger.warn(
+          `[cloudflare-replay] No se pudo determinar el live input UID para ${eventSlug}`,
+        );
+        return;
+      }
+
+      const result =
+        await this.cloudflareStreamService.getReplayUrl(liveInputUid);
+
+      if (result.status === 'ready' && result.replayUrl) {
+        await this.setEventStreamUrl(eventSlug, 'cloudflare', result.replayUrl);
+        this.logger.log(
+          `[cloudflare-replay] Grabación lista para ${eventSlug}: ${result.replayUrl}`,
+        );
+        return;
+      }
+
+      if (attempt >= MAX_ATTEMPTS) {
+        this.logger.warn(
+          `[cloudflare-replay] Sin grabación lista para ${eventSlug} tras ${MAX_ATTEMPTS} intentos (status=${result.status}: ${result.message})`,
+        );
+        return;
+      }
+
+      setTimeout(() => {
+        void this.applyCloudflareReplayWhenReady(eventSlug, attempt + 1);
+      }, RETRY_DELAY_MS);
+    } catch (err) {
+      this.logger.warn(
+        `[cloudflare-replay] Error buscando la grabación para ${eventSlug}: ${String(err)}`,
+      );
+    }
   }
 
   async updateEvent(eventId: string, updates: any) {
