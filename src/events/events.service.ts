@@ -889,7 +889,7 @@ export class EventsService implements OnModuleInit {
   async updateStream(
     eventId: string,
     payload: {
-      provider: 'vimeo' | 'mux' | 'cloudflare';
+      provider: 'vimeo' | 'mux' | 'cloudflare' | 'bunny';
       url: string;
       meta?: any;
     },
@@ -932,13 +932,13 @@ export class EventsService implements OnModuleInit {
 
   /**
    * RTMP server por defecto de cada proveedor soportado para auto-selección
-   * en el estudio (ver `updateStreams`). Por ahora solo Vimeo y Cloudflare;
-   * el resto de proveedores de `streams` (bunny, other) no tienen un ingest
-   * RTMP propio conocido, así que no disparan el sync.
+   * en el estudio (ver `updateStreams`). Por ahora Vimeo, Cloudflare y
+   * Bunny; "other" (streams sin RTMP propio conocido) no dispara el sync.
    */
   private static readonly RTMP_SERVER_BY_PROVIDER: Record<string, string> = {
     vimeo: 'rtmp://rtmp-global.cloud.vimeo.com/live',
     cloudflare: 'rtmps://live.cloudflare.com:443/live',
+    bunny: 'rtmp://global.rtmp.mediadelivery.net/live',
   };
 
   /**
@@ -1000,7 +1000,10 @@ export class EventsService implements OnModuleInit {
    */
   async syncStreamFromStudio(
     eventSlug: string,
-    payload: { url: string; provider: 'vimeo' | 'mux' | 'gcore' | 'cloudflare' },
+    payload: {
+      url: string;
+      provider: 'vimeo' | 'mux' | 'gcore' | 'cloudflare' | 'bunny';
+    },
   ) {
     if (!eventSlug || !payload.url) return null;
     const filter = { slug: eventSlug, status: { $in: ['upcoming', 'live'] } };

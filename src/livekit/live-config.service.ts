@@ -74,6 +74,15 @@ export class LiveConfigService {
     );
   }
 
+  private isBunnyUrl(
+    cfg: Pick<LiveStreamConfig, 'rtmpServerUrl' | 'playbackHlsUrl'>,
+  ) {
+    return (
+      /mediadelivery\.net/i.test(cfg.rtmpServerUrl || '') ||
+      /mediadelivery\.net|b-cdn\.net/i.test(cfg.playbackHlsUrl || '')
+    );
+  }
+
   /**
    * Reprovisiona Mux si el config está vacío o apunta a Gcore.
    * NO reprovisiona si ya es Mux, Vimeo o Cloudflare (credenciales manuales).
@@ -98,6 +107,7 @@ export class LiveConfigService {
     const urlSaysGcore = this.isGcoreUrl(cfg);
     const urlSaysVimeo = this.isVimeoUrl(cfg);
     const urlSaysCloudflare = this.isCloudflareUrl(cfg);
+    const urlSaysBunny = this.isBunnyUrl(cfg);
 
     if (urlSaysMux && cfg.provider !== 'mux') {
       await this.model.updateOne({ eventSlug }, { $set: { provider: 'mux' } });
@@ -120,12 +130,19 @@ export class LiveConfigService {
         { $set: { provider: 'cloudflare' } },
       );
       cfg.provider = 'cloudflare' as any;
+    } else if (urlSaysBunny && cfg.provider !== 'bunny') {
+      await this.model.updateOne(
+        { eventSlug },
+        { $set: { provider: 'bunny' } },
+      );
+      cfg.provider = 'bunny' as any;
     }
 
-    // 3) Si el proveedor es Vimeo o Cloudflare, no reprovisionamos (credenciales manuales)
+    // 3) Si el proveedor es Vimeo, Cloudflare o Bunny, no reprovisionamos (credenciales manuales)
     if (
       (cfg.provider as string) === 'vimeo' ||
-      (cfg.provider as string) === 'cloudflare'
+      (cfg.provider as string) === 'cloudflare' ||
+      (cfg.provider as string) === 'bunny'
     ) {
       return cfg;
     }

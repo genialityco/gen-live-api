@@ -4,11 +4,13 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import {
   EgressClient,
-  EncodingOptionsPreset,
+  EncodingOptions,
   StreamProtocol,
   RoomCompositeOptions,
   StreamOutput,
   AccessToken,
+  VideoCodec,
+  AudioCodec,
 } from 'livekit-server-sdk';
 import { LiveConfigService } from './live-config.service';
 
@@ -82,7 +84,19 @@ export class LivekitEgressService {
 
     return {
       layout,
-      encodingOptions: EncodingOptionsPreset.H264_720P_30,
+      // Mismo video/audio que el preset H264_720P_30 (1280x720, 30fps,
+      // 3000kbps, H264_MAIN/OPUS), pero con keyFrameInterval más corto (2s
+      // en vez del default de 4s) para bajar la latencia de LL-HLS en
+      // Cloudflare — Cloudflare recomienda GOP de 2-4s para low-latency.
+      encodingOptions: new EncodingOptions({
+        width: 1280,
+        height: 720,
+        framerate: 30,
+        videoCodec: VideoCodec.H264_MAIN,
+        videoBitrate: 3000,
+        audioCodec: AudioCodec.OPUS,
+        keyFrameInterval: 2,
+      }),
       customBaseUrl: `${frontendUrl}/lk-egress?${params.toString()}`,
     };
   }

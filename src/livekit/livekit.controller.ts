@@ -162,7 +162,7 @@ export class LivekitController {
     @Body()
     body: {
       eventSlug: string;
-      provider?: 'vimeo' | 'cloudflare' | 'mux' | 'gcore';
+      provider?: 'vimeo' | 'cloudflare' | 'mux' | 'gcore' | 'bunny';
       ingestProtocol?: 'rtmp' | 'srt';
       rtmpServerUrl?: string;
       rtmpStreamKey?: string;
@@ -204,14 +204,16 @@ export class LivekitController {
     // respeta la fase (solo upcoming/live) para no pisar la URL de replay.
     if (allowSecrets && typeof patch.playbackHlsUrl === 'string' && patch.playbackHlsUrl) {
       const url: string = patch.playbackHlsUrl;
-      const provider: 'vimeo' | 'mux' | 'gcore' | 'cloudflare' =
+      const provider: 'vimeo' | 'mux' | 'gcore' | 'cloudflare' | 'bunny' =
         /vimeo\.com/i.test(url)
           ? 'vimeo'
           : /gvideo\.(co|io)/i.test(url)
             ? 'gcore'
             : /cloudflarestream\.com/i.test(url)
               ? 'cloudflare'
-              : 'mux';
+              : /mediadelivery\.net|b-cdn\.net/i.test(url)
+                ? 'bunny'
+                : 'mux';
       try {
         await this.eventsService.syncStreamFromStudio(body.eventSlug, {
           url,

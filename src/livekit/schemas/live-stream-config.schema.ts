@@ -61,8 +61,8 @@ export class LiveStreamConfig {
   @Prop({ default: '' })
   lastError: string;
 
-  @Prop({ enum: ['gcore', 'mux', 'vimeo', 'cloudflare'], default: 'gcore' })
-  provider: 'gcore' | 'mux' | 'vimeo' | 'cloudflare';
+  @Prop({ enum: ['gcore', 'mux', 'vimeo', 'cloudflare', 'bunny'], default: 'gcore' })
+  provider: 'gcore' | 'mux' | 'vimeo' | 'cloudflare' | 'bunny';
 
   @Prop({ default: '' })
   providerStreamId: string; // en mux: live_stream_id; en cloudflare: live_input uid
