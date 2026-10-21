@@ -184,15 +184,34 @@ export class PollService {
       poll.publishedAt = new Date();
 
       // Despublicar otras encuestas del mismo evento si hay alguna publicada
-      await this.pollModel.updateMany(
-        {
-          eventId: poll.eventId,
-          _id: { $ne: poll._id },
-          status: PollStatus.PUBLISHED,
-        },
-        {
-          $set: { status: PollStatus.CLOSED, closedAt: new Date() },
-        },
+      const othersFilter = {
+        eventId: poll.eventId,
+        _id: { $ne: poll._id },
+        status: PollStatus.PUBLISHED,
+      };
+      const others = await this.pollModel
+        .find(othersFilter, { _id: 1 })
+        .lean();
+      await this.pollModel.updateMany(othersFilter, {
+        $set: { status: PollStatus.CLOSED, closedAt: new Date() },
+      });
+
+      // Reflejar el cierre en RTDB para que la página pública de resultados
+      // (que escucha events/{eventId}/polls/{pollId}) no las siga mostrando "En vivo"
+      await Promise.all(
+        others.map((other) =>
+          this.rtdbService
+            .update(
+              `events/${String(poll.eventId)}/polls/${String(other._id)}/status`,
+              PollStatus.CLOSED,
+            )
+            .catch((error: unknown) =>
+              console.error(
+                'Error updating RTDB:',
+                error instanceof Error ? error.message : String(error),
+              ),
+            ),
+        ),
       );
     } else if (status === PollStatus.CLOSED) {
       poll.closedAt = new Date();
