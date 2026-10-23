@@ -24,6 +24,7 @@ import { EventUserController } from './event-user.controller';
 import { PollService } from './poll.service';
 import { PollController } from './poll.controller';
 import { ViewingMetricsService } from './viewing-metrics.service.v2';
+import { HerdService } from './herd.service';
 import { RtdbModule } from '../rtdb/rtdb.module';
 import { LivekitModule } from '../livekit/livekit.module';
 import {
@@ -70,6 +71,7 @@ import { Logger } from '@nestjs/common';
     EventUserService,
     ViewingMetricsService,
     PollService,
+    HerdService,
   ],
   controllers: [EventsController, EventUserController, PollController],
   exports: [

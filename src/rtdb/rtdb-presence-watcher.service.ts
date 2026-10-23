@@ -383,6 +383,7 @@ export class RtdbPresenceWatcherService implements OnModuleDestroy {
 
       // Liberar cache en memoria
       this.presenceCache.delete(eventId);
+      this.viewingMetricsService?.clearHerdState?.(eventId);
       this.flushCount.delete(eventId);
       this.flushFirstScheduled.delete(eventId);
 

@@ -46,6 +46,56 @@ export interface EventCertificatesConfig {
   certEventId?: string;
 }
 
+export type HerdPosition =
+  | 'top-left'
+  | 'top-center'
+  | 'top-right'
+  | 'bottom-left'
+  | 'bottom-center'
+  | 'bottom-right';
+
+/** Apariencia y comportamiento de un tipo de mensaje de manada */
+export interface HerdMessageConfig {
+  enabled?: boolean;
+  // Variables: {nombre}, {cantidad}, {grupo}, {total}
+  template?: string;
+  position?: HerdPosition;
+  durationSec?: number;
+  label?: string; // etiqueta corta opcional del banner
+  // Apariencia del banner (mismas plantillas que los anuncios del estudio, ver
+  // AnnouncementStyle en el web); la colocación sale de `position`
+  style?: {
+    template?: string;
+    mode?: string;
+    size?: string;
+    animation?: string;
+    font?: string;
+    bgColor?: string;
+    textColor?: string;
+    accentColor?: string;
+  };
+}
+
+/**
+ * Anuncios de "manada" sobre el video del asistente: agrupa a los conectados
+ * por un campo del formulario de registro (p. ej. especialidad o sociedad) y
+ * avisa en tiempo real cuántos de cada grupo hay ("contigo ya son 34
+ * endocrinólogos conectados"). El mensaje privado lo ve solo quien llega; el
+ * público, todos.
+ */
+export interface EventHerdConfig {
+  enabled: boolean;
+  fieldId?: string; // campo del formulario de la org que define la manada
+  // Nombre a mostrar por opción (plural: "endocrinólogos"); si falta, la etiqueta de la opción
+  groupLabels?: Array<{ value: string; label: string }>;
+  accentColor?: string;
+  privateMessage?: HerdMessageConfig;
+  publicMessage?: HerdMessageConfig & {
+    minIntervalSec?: number; // separación mínima entre anuncios públicos
+    milestoneEvery?: number; // 1 = cada llegada; 10 = al llegar a 10, 20, 30...
+  };
+}
+
 @Schema({ timestamps: true })
 export class Event {
   @Prop({ type: Types.ObjectId, ref: 'Organization', required: true })
@@ -115,6 +165,9 @@ export class Event {
 
   @Prop({ type: Object })
   certificatesConfig?: EventCertificatesConfig;
+
+  @Prop({ type: Object })
+  herdConfig?: EventHerdConfig;
 
   @Prop({ default: false })
   hidden?: boolean;

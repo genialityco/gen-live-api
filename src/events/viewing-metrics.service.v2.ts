@@ -10,6 +10,7 @@ import { EventMetrics } from './schemas/event-metrics.schema';
 import { EventUser } from './schemas/event-user.schema';
 import { Event, EventDocument } from './schemas/event.schema';
 import { RtdbService } from '../rtdb/rtdb.service';
+import { HerdService } from './herd.service';
 
 /**
  * ViewingMetricsService v2 - Basado en Firebase RTDB Presence
@@ -72,6 +73,7 @@ export class ViewingMetricsService {
     @InjectModel(Event.name)
     private eventModel: Model<EventDocument>,
     private rtdbService: RtdbService,
+    private herdService: HerdService,
   ) {
     // Limpiar caché de UIDs desconocidos cada 15 minutos
     setInterval(() => this.cleanUnknownUIDsCache(), 15 * 60 * 1000);
@@ -231,6 +233,7 @@ export class ViewingMetricsService {
     if (initialActiveUIDs.length === 0) {
       // Todos los usuarios se fueron — resetear contador a 0
       await this._persistMetrics(eventId, new Set(), isLive);
+      void this.herdService.onActiveAttendees(eventId, []);
       return;
     }
 
@@ -256,7 +259,7 @@ export class ViewingMetricsService {
     const eventUsers = await this.eventUserModel
       .find(
         { eventId, firebaseUID: { $in: uidsToCheck } },
-        { _id: 1, firebaseUID: 1 },
+        { _id: 1, firebaseUID: 1, attendeeId: 1 },
       )
       .lean()
       .exec();
@@ -302,6 +305,7 @@ export class ViewingMetricsService {
     if (registeredUIDs.length === 0) {
       // No hay usuarios registrados — persistir 0 concurrentes sin query adicional
       await this._persistMetrics(eventId, new Set(), isLive);
+      void this.herdService.onActiveAttendees(eventId, []);
       return;
     }
 
@@ -449,6 +453,20 @@ export class ViewingMetricsService {
     );
 
     await this._persistMetrics(eventId, activeEventUserIds, isLive);
+
+    // Anuncios de manada: conteos por grupo del registro (sin bloquear el flush)
+    void this.herdService.onActiveAttendees(
+      eventId,
+      registeredUIDs.map((uid) => ({
+        uid,
+        attendeeId: String(eventUserMap.get(uid)!.attendeeId),
+      })),
+    );
+  }
+
+  /** Libera el estado de manada de un evento cuyo watcher se apagó */
+  clearHerdState(eventId: string) {
+    this.herdService.clearEvent(eventId);
   }
 
   /**
@@ -873,7 +891,9 @@ export class ViewingMetricsService {
         cleared++;
       }
     }
-    this.logger.log(`Cleared ${cleared} unknown UID cache entries for event ${eventId}`);
+    this.logger.log(
+      `Cleared ${cleared} unknown UID cache entries for event ${eventId}`,
+    );
     return { cleared };
   }
 }

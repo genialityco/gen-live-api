@@ -30,6 +30,9 @@ import { UpdateStreamsDto } from './dtos/update-streams.dto';
 import { UpdateEmergencyModeDto } from './dtos/update-emergency-mode.dto';
 import { UpdateEventBrandingDto } from './dtos/update-event-branding.dto';
 import { UpdateCertificatesConfigDto } from './dtos/update-certificates-config.dto';
+import { UpdateHerdConfigDto } from './dtos/update-herd-config.dto';
+import { AnnounceHerdDto } from './dtos/announce-herd.dto';
+import { HerdService } from './herd.service';
 import { RegisterToEventDto } from './dtos/register-to-event.dto';
 import { TransferEventDto } from './dtos/transfer-event.dto';
 import { FindRegistrationDto } from './dtos/find-registration.dto';
@@ -46,6 +49,7 @@ export class EventsController {
     private metricsService: ViewingMetricsService,
     private emailCampaigns: EmailCampaignService,
     private waCampaigns: WaCampaignService,
+    private herd: HerdService,
   ) {}
 
   // ENDPOINTS PÚBLICOS (sin autenticación)
@@ -277,6 +281,26 @@ export class EventsController {
     @Body() dto: UpdateCertificatesConfigDto,
   ) {
     return await this.svc.updateCertificatesConfig(eventId, dto.enabled);
+  }
+
+  // Configura los anuncios de manada sobre el video del asistente (dueñ@ del evento)
+  @Patch(':eventId/herd-config')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async updateHerdConfig(
+    @Param('eventId') eventId: string,
+    @Body() dto: UpdateHerdConfigDto,
+  ) {
+    return await this.herd.updateConfig(eventId, dto);
+  }
+
+  // Lanza ya un anuncio de manada, público o privado (dueñ@ del evento)
+  @Post(':eventId/herd/announce')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async announceHerd(
+    @Param('eventId') eventId: string,
+    @Body() dto: AnnounceHerdDto,
+  ) {
+    return await this.herd.announceNow(eventId, dto.type, dto.key, dto.text);
   }
 
   // Sincroniza en bloque con gen-certificados a los asistentes que ya
