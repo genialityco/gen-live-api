@@ -215,7 +215,20 @@ export class LivekitEgressService {
   }
 
   async stopEgress(egressId: string) {
-    return this.egressClient.stopEgress(egressId);
+    try {
+      return await this.egressClient.stopEgress(egressId);
+    } catch (err: any) {
+      // El egress ya terminó por su cuenta (sala vacía, fallo, límite): LiveKit
+      // responde failed_precondition. Detener debe ser idempotente para que el
+      // estudio pueda limpiar su estado y volver a iniciar.
+      if (err?.code === 'failed_precondition' || err?.status === 412) {
+        console.warn(
+          `⚠️ [egress] ${egressId} ya estaba finalizado: ${err?.message ?? err}`,
+        );
+        return this.getEgress(egressId);
+      }
+      throw err;
+    }
   }
 
   async getEgress(egressId: string) {
