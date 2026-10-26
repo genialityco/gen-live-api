@@ -26,9 +26,17 @@ class HerdGroupLabelDto {
   @MaxLength(200)
   value!: string;
 
+  // Plural ("endocrinólogos")
+  @IsOptional()
   @IsString()
   @MaxLength(80)
-  label!: string;
+  label?: string;
+
+  // Singular ("endocrinólogo")
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  singular?: string;
 }
 
 /** Apariencia del banner: mismas opciones que los anuncios del estudio */
@@ -98,6 +106,36 @@ class HerdMessageDto {
   @ValidateNested()
   @Type(() => HerdStyleDto)
   style?: HerdStyleDto;
+
+  // 0 = no repetir
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(3600)
+  repeatEverySec?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(280)
+  repeatTemplate?: string;
+}
+
+class HerdPrivateMessageDto extends HerdMessageDto {
+  // Cuántos de cada grupo ven el mensaje de "eres la primera…" (0 = ninguno)
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(10)
+  firstCount?: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(280)
+  firstTemplate?: string;
+
+  @IsOptional()
+  @IsIn(['f', 'm'])
+  ordinalGender?: 'f' | 'm';
 }
 
 class HerdPublicMessageDto extends HerdMessageDto {
@@ -135,8 +173,8 @@ export class UpdateHerdConfigDto {
 
   @IsOptional()
   @ValidateNested()
-  @Type(() => HerdMessageDto)
-  privateMessage?: HerdMessageDto;
+  @Type(() => HerdPrivateMessageDto)
+  privateMessage?: HerdPrivateMessageDto;
 
   @IsOptional()
   @ValidateNested()

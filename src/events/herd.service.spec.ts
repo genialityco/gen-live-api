@@ -47,12 +47,15 @@ function setup(herdConfig: any) {
     ),
   };
   const orgAttendeeModel = {
+    collection: { name: 'orgattendees' },
     find: jest.fn((q: any) =>
       lean(q._id.$in.map((id: string) => attendees[id]).filter(Boolean)),
     ),
   };
+  const stored: Record<string, any> = {};
   const rtdb = {
     ref: (path: string) => ({
+      once: () => Promise.resolve({ val: () => stored[path] ?? null }),
       set: (value: any) => {
         writes.push({ path, value });
         return Promise.resolve();
@@ -64,13 +67,25 @@ function setup(herdConfig: any) {
       remove: () => Promise.resolve(),
     }),
   };
+  // Simula la agregación: inscritos agrupados por el valor crudo del campo
+  const eventUserModel = {
+    aggregate: jest.fn(() => {
+      const byRaw = new Map<unknown, number>();
+      for (const a of Object.values(attendees)) {
+        const raw = a.registrationData.esp;
+        byRaw.set(raw, (byRaw.get(raw) ?? 0) + 1);
+      }
+      return Promise.resolve([...byRaw].map(([_id, n]) => ({ _id, n })));
+    }),
+  };
   const svc = new HerdService(
     eventModel as any,
     orgModel as any,
     orgAttendeeModel as any,
     rtdb as any,
+    eventUserModel as any,
   );
-  return { svc, writes, orgAttendeeModel, attendees };
+  return { svc, writes, orgAttendeeModel, attendees, stored, eventUserModel };
 }
 
 const baseConfig = {
@@ -153,8 +168,23 @@ describe('HerdService', () => {
     const members = writes.filter((w) => w.path === '/herd/ev1/members');
     expect(members.map((w) => w.value)).toEqual([
       // a5 no tiene grupo: null borra un grupo viejo si lo hubiera
-      { ua1: { key: 'endocrinologia', label: 'endocrinólogos' }, ua5: null },
-      { ua3: { key: 'pediatria', label: 'Pediatría' } },
+      {
+        ua1: {
+          key: 'endocrinologia',
+          label: 'endocrinólogos',
+          singular: 'endocrinólogo',
+          position: 1,
+        },
+        ua5: null,
+      },
+      {
+        ua3: {
+          key: 'pediatria',
+          label: 'Pediatría',
+          singular: 'Pediatría',
+          position: 1,
+        },
+      },
     ]);
   });
 
@@ -168,7 +198,12 @@ describe('HerdService', () => {
 
     const members = writes.filter((w) => w.path === '/herd/ev1/members');
     expect(members.at(-1)?.value).toEqual({
-      ua3: { key: 'endocrinologia', label: 'endocrinólogos' },
+      ua3: {
+        key: 'endocrinologia',
+        label: 'endocrinólogos',
+        singular: 'endocrinólogo',
+        position: 2,
+      },
     });
     const live = writes.filter((w) => w.path === '/herd/ev1/live');
     expect(live.at(-1)?.value.counts).toEqual({ endocrinologia: 2 });
@@ -217,6 +252,80 @@ describe('HerdService', () => {
       { key: null },
       { key: 'pediatria', text: 'Hola {nombre}' },
     ]);
+  });
+
+  it('numera la llegada por grupo, la mantiene al volver y la retoma tras reiniciar', async () => {
+    const { svc, writes } = setup(baseConfig);
+    await svc.onActiveAttendees('ev1', m(['a1']));
+    await svc.onActiveAttendees('ev1', m(['a1', 'a3', 'a2']));
+    // a1 sale y vuelve: conserva su puesto
+    await svc.onActiveAttendees('ev1', m(['a3', 'a2']));
+    await svc.onActiveAttendees('ev1', m(['a3', 'a2', 'a1']));
+
+    const arrivals = writes.filter((w) => w.path === '/herd/ev1/arrivals');
+    expect(arrivals.map((w) => w.value)).toEqual([
+      { 'endocrinologia/a1': 1 },
+      { 'pediatria/a3': 1, 'endocrinologia/a2': 2 },
+    ]);
+
+    // Otro proceso arranca con lo persistido: a4 es el tercero, no el primero
+    const fresh = setup(baseConfig);
+    fresh.stored['/herd/ev1/arrivals'] = { endocrinologia: { a1: 1, a2: 2 } };
+    await fresh.svc.onActiveAttendees('ev1', m(['a4']));
+    const members = fresh.writes.find((w) => w.path === '/herd/ev1/members');
+    expect(members?.value.ua4).toMatchObject({
+      key: 'endocrinologia',
+      position: 3,
+    });
+  });
+
+  it('repite el público cada repeatEverySec con el conteo actual, rotando grupos', async () => {
+    jest.useFakeTimers({ now: 1_000_000 });
+    const { svc, writes } = setup({
+      ...baseConfig,
+      publicMessage: { enabled: true, minIntervalSec: 20, repeatEverySec: 60 },
+    });
+    const publics = () => writes.filter((w) => w.path === '/herd/ev1/public');
+    const all = m(['a1', 'a2', 'a3']);
+
+    await svc.onActiveAttendees('ev1', all); // línea base
+    jest.setSystemTime(1_000_000 + 30_000);
+    await svc.onActiveAttendees('ev1', all);
+    expect(publics()).toHaveLength(0);
+
+    jest.setSystemTime(1_000_000 + 61_000);
+    await svc.onActiveAttendees('ev1', all);
+    jest.setSystemTime(1_000_000 + 122_000);
+    await svc.onActiveAttendees('ev1', all);
+    expect(publics().map((w) => w.value)).toMatchObject([
+      { key: 'endocrinologia', count: 2, repeat: true },
+      { key: 'pediatria', count: 1, repeat: true },
+    ]);
+  });
+
+  it('cuenta los inscritos por grupo y los publica con los conteos y el anuncio', async () => {
+    jest.useFakeTimers({ now: 1_000_000 });
+    const { svc, writes, eventUserModel } = setup(baseConfig);
+    await svc.onActiveAttendees('ev1', m(['a1']));
+    await svc.onActiveAttendees('ev1', m(['a1', 'a2']));
+
+    const live = writes.filter((w) => w.path === '/herd/ev1/live').at(-1);
+    // a1, a2 (por etiqueta) y a4 son endocrinología; a5 no tiene grupo pero cuenta en el total
+    expect(live?.value).toMatchObject({
+      registered: { endocrinologia: 3, pediatria: 1 },
+      registeredTotal: 5,
+    });
+    const pub = writes.find((w) => w.path === '/herd/ev1/public');
+    expect(pub?.value).toMatchObject({
+      count: 2,
+      registered: 3,
+      registeredTotal: 5,
+    });
+    // Dentro del TTL no se vuelve a consultar
+    expect(eventUserModel.aggregate).toHaveBeenCalledTimes(1);
+    jest.setSystemTime(1_000_000 + 61_000);
+    await svc.onActiveAttendees('ev1', m(['a1', 'a2']));
+    expect(eventUserModel.aggregate).toHaveBeenCalledTimes(2);
   });
 
   it('no hace nada si está desactivado', async () => {

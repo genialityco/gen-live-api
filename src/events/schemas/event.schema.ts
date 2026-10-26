@@ -62,6 +62,10 @@ export interface HerdMessageConfig {
   position?: HerdPosition;
   durationSec?: number;
   label?: string; // etiqueta corta opcional del banner
+  // Repetir el mensaje cada N segundos con los conteos actuales (0 = no repetir)
+  repeatEverySec?: number;
+  // Plantilla de las repeticiones; vacía = la misma `template`
+  repeatTemplate?: string;
   // Apariencia del banner (mismas plantillas que los anuncios del estudio, ver
   // AnnouncementStyle en el web); la colocación sale de `position`
   style?: {
@@ -86,10 +90,18 @@ export interface HerdMessageConfig {
 export interface EventHerdConfig {
   enabled: boolean;
   fieldId?: string; // campo del formulario de la org que define la manada
-  // Nombre a mostrar por opción (plural: "endocrinólogos"); si falta, la etiqueta de la opción
-  groupLabels?: Array<{ value: string; label: string }>;
+  // Nombre a mostrar por opción: plural ("endocrinólogos") y/o singular
+  // ("endocrinólogo"); la forma que falte se deduce (herd-grammar.ts) y sin
+  // ninguna se usa la etiqueta de la opción
+  groupLabels?: Array<{ value: string; label?: string; singular?: string }>;
   accentColor?: string;
-  privateMessage?: HerdMessageConfig;
+  privateMessage?: HerdMessageConfig & {
+    // Los primeros N de cada grupo en conectarse ven `firstTemplate` con
+    // {posicion} ("primera", "segundo"...); del N+1 en adelante, `template`
+    firstCount?: number; // 0 = desactivado
+    firstTemplate?: string;
+    ordinalGender?: 'f' | 'm'; // f: primera, segunda… · m: primer, segundo…
+  };
   publicMessage?: HerdMessageConfig & {
     minIntervalSec?: number; // separación mínima entre anuncios públicos
     milestoneEvery?: number; // 1 = cada llegada; 10 = al llegar a 10, 20, 30...

@@ -14,8 +14,10 @@ import * as admin from 'firebase-admin';
 import { Event, EventDocument, EventHerdConfig } from './schemas/event.schema';
 import { Organization } from '../organizations/schemas/organization.schema';
 import { OrgAttendee } from '../organizations/schemas/org-attendee.schema';
+import { EventUser } from './schemas/event-user.schema';
 import { RtdbService } from '../rtdb/rtdb.service';
 import { UpdateHerdConfigDto } from './dtos/update-herd-config.dto';
+import { herdGroupForms } from './herd-grammar';
 
 /**
  * Normaliza un valor del formulario para comparar sin tildes/mayúsculas.
@@ -46,6 +48,12 @@ export const DEFAULT_HERD_CONFIG: Required<
     template: '¡Hola {nombre}! Contigo ya son {cantidad} {grupo} conectados',
     position: 'top-left',
     durationSec: 8,
+    repeatEverySec: 0,
+    repeatTemplate: '',
+    firstCount: 5,
+    firstTemplate:
+      '¡Hola {nombre}! Eres la {posicion} persona de {grupo_plural} en conectarse',
+    ordinalGender: 'f',
   },
   publicMessage: {
     enabled: true,
@@ -54,10 +62,19 @@ export const DEFAULT_HERD_CONFIG: Required<
     durationSec: 6,
     minIntervalSec: 20,
     milestoneEvery: 1,
+    repeatEverySec: 0,
+    repeatTemplate: '',
   },
 };
 
-type Group = { key: string; label: string };
+// Repetición mínima: los flushes de presencia llegan cada ~15 s (heartbeats)
+const MIN_REPEAT_SEC = 30;
+
+// label = plural ("endocrinólogos"); singular = "endocrinólogo"
+type Group = { key: string; label: string; singular: string };
+
+/** Grupo propio publicado en /herd/{eventId}/members/{uid} */
+type MemberEntry = Group & { position?: number };
 
 /** Contexto por evento: config + resolución valor → grupo, con caché */
 type HerdContext = {
@@ -72,15 +89,26 @@ type HerdState = {
   countsJson: string;
   // Último conteo calculado (para el anuncio manual desde el admin)
   counts: Record<string, number>;
-  labels: Map<string, string>;
+  labels: Map<string, Group>;
   total: number;
+  // Inscritos al evento por grupo ("ya son 12 de 50 inscritos"); se recalcula
+  // cada REGISTERED_TTL_MS. registeredAt = 0 → nunca calculado
+  registered: Record<string, number>;
+  registeredTotal: number;
+  registeredAt: number;
   // Último conteo anunciado públicamente por grupo (marca de agua): solo se
   // anuncia al superar este valor, así un asistente que recarga la página no
   // vuelve a disparar "ya son N".
   announced: Map<string, number>;
   lastAnnouncedAt: Map<string, number>;
   lastPublicAt: number;
-  // uid → clave del grupo publicado en /herd/{eventId}/members (null = sin grupo)
+  // Inicio del estado: la repetición periódica cuenta desde aquí si aún no
+  // hubo anuncio, para no anunciar de golpe al arrancar
+  startedAt: number;
+  // grupo → (attendeeId → orden de llegada 1, 2, 3…). Se persiste en
+  // /herd/{eventId}/arrivals para que un reinicio no repita "eres la primera"
+  arrivals: Map<string, Map<string, number>>;
+  // uid → "clave|posición" publicada en /herd/{eventId}/members (null = sin grupo)
   membersWritten: Map<string, string | null>;
   // UIDs presentes en el flush anterior: los que no estaban acaban de llegar
   activeUids: Set<string>;
@@ -101,6 +129,7 @@ export class HerdService {
   // sigue conectado, cada GROUP_TTL_MS: así se refleja si actualiza su registro.
   private attendeeGroups = new Map<string, Map<string, CachedGroup>>();
   private readonly GROUP_TTL_MS = 2 * 60_000;
+  private readonly REGISTERED_TTL_MS = 60_000;
   private states = new Map<string, HerdState>();
   // Serializa el procesamiento por evento (flushes solapados del watcher)
   private chains = new Map<string, Promise<void>>();
@@ -111,6 +140,7 @@ export class HerdService {
     @InjectModel(OrgAttendee.name)
     private orgAttendeeModel: Model<OrgAttendee>,
     private rtdb: RtdbService,
+    @InjectModel(EventUser.name) private eventUserModel: Model<EventUser>,
   ) {}
 
   // ── Configuración ────────────────────────────────────────────────────────
@@ -122,7 +152,9 @@ export class HerdService {
     const herdConfig: EventHerdConfig = {
       enabled: dto.enabled,
       fieldId: dto.fieldId || undefined,
-      groupLabels: (dto.groupLabels ?? []).filter((g) => g.label?.trim()),
+      groupLabels: (dto.groupLabels ?? []).filter(
+        (g) => g.label?.trim() || g.singular?.trim(),
+      ),
       accentColor: dto.accentColor || DEFAULT_HERD_CONFIG.accentColor,
       privateMessage: {
         ...DEFAULT_HERD_CONFIG.privateMessage,
@@ -172,12 +204,19 @@ export class HerdService {
         value: string;
         label: string;
       }>
-    ).map((o) => ({
-      key: herdKey(o.value),
-      value: String(o.value),
-      optionLabel: String(o.label ?? o.value),
-      label: labels.get(String(o.value)) || String(o.label ?? o.value),
-    }));
+    ).map((o) => {
+      const forms = herdGroupForms(
+        labels.get(String(o.value)),
+        String(o.label ?? o.value),
+      );
+      return {
+        key: herdKey(o.value),
+        value: String(o.value),
+        optionLabel: String(o.label ?? o.value),
+        label: forms.plural,
+        singular: forms.singular,
+      };
+    });
 
     const { enabled, accentColor, privateMessage, publicMessage } = ctx.config;
     await this.rtdb.ref(`/herd/${eventId}/config`).set(
@@ -195,9 +234,10 @@ export class HerdService {
     );
   }
 
+  /** Formas escritas por el admin para cada opción (plural y/o singular) */
   private labelOverrides(config: EventHerdConfig) {
     return new Map(
-      (config.groupLabels ?? []).map((g) => [String(g.value), g.label.trim()]),
+      (config.groupLabels ?? []).map((g) => [String(g.value), g] as const),
     );
   }
 
@@ -250,13 +290,16 @@ export class HerdService {
       if (v == null || typeof v === 'object' || !String(v).trim()) return null;
       const opt = byNorm.get(norm(v));
       if (opt) {
+        const forms = herdGroupForms(labels.get(opt.value), opt.label);
         return {
           key: herdKey(opt.value),
-          label: labels.get(opt.value) || opt.label,
+          label: forms.plural,
+          singular: forms.singular,
         };
       }
       // Campo de texto libre (o valor fuera de las opciones): agrupa por texto normalizado
-      return { key: herdKey(v), label: String(v).trim() };
+      const text = String(v).trim();
+      return { key: herdKey(v), label: text, singular: text };
     };
 
     const prevFieldId = cached?.fieldId ?? null;
@@ -305,11 +348,16 @@ export class HerdService {
       announced: new Map(),
       lastAnnouncedAt: new Map(),
       lastPublicAt: 0,
+      startedAt: Date.now(),
+      arrivals: await this.loadArrivals(eventId),
       membersWritten: new Map(),
       activeUids: new Set(),
       counts: {},
       labels: new Map(),
       total: 0,
+      registered: {},
+      registeredTotal: 0,
+      registeredAt: 0,
     };
     this.states.set(eventId, state);
 
@@ -325,30 +373,51 @@ export class HerdService {
     const groups = await this.resolveGroups(eventId, ctx, attendeeIds, arrived);
 
     const counts: Record<string, number> = {};
-    const labels = new Map<string, string>();
+    const labels = new Map<string, Group>();
     for (const id of attendeeIds) {
       const g = groups.get(id);
       if (!g) continue;
       counts[g.key] = (counts[g.key] ?? 0) + 1;
-      labels.set(g.key, g.label);
+      labels.set(g.key, g);
     }
     const total = attendeeIds.length;
 
-    // Grupo propio de cada asistente, para su mensaje privado: así la página no
-    // depende de tener el registrationData (según cómo inició sesión puede no
-    // tenerlo). Solo se escribe al llegar o si su grupo cambió.
-    const memberUpdates: Record<string, Group | null> = {};
+    // Orden de llegada dentro de cada grupo: se asigna la primera vez que se
+    // ve al asistente en ese grupo y no cambia aunque salga y vuelva.
+    const arrivalUpdates: Record<string, number> = {};
+    for (const id of attendeeIds) {
+      const g = groups.get(id);
+      if (!g) continue;
+      const order = state.arrivals.get(g.key) ?? new Map<string, number>();
+      state.arrivals.set(g.key, order);
+      if (order.has(id)) continue;
+      order.set(id, order.size + 1);
+      arrivalUpdates[`${g.key}/${id}`] = order.size;
+    }
+    if (Object.keys(arrivalUpdates).length) {
+      await this.rtdb.ref(`/herd/${eventId}/arrivals`).update(arrivalUpdates);
+    }
+
+    // Grupo propio de cada asistente (y su orden de llegada), para su mensaje
+    // privado: así la página no depende de tener el registrationData (según
+    // cómo inició sesión puede no tenerlo). Solo se escribe al llegar o si su
+    // grupo cambió.
+    const memberUpdates: Record<string, MemberEntry | null> = {};
     for (const m of members) {
       const g = groups.get(m.attendeeId) ?? null;
-      const key = g?.key ?? null;
+      const position = g
+        ? state.arrivals.get(g.key)?.get(m.attendeeId)
+        : undefined;
+      const entry = g ? { ...g, ...(position ? { position } : {}) } : null;
+      const written = g ? `${g.key}|${position ?? ''}` : null;
       if (
         state.membersWritten.has(m.uid) &&
-        state.membersWritten.get(m.uid) === key
+        state.membersWritten.get(m.uid) === written
       ) {
         continue;
       }
-      state.membersWritten.set(m.uid, key);
-      memberUpdates[m.uid] = g;
+      state.membersWritten.set(m.uid, written);
+      memberUpdates[m.uid] = entry;
     }
     if (Object.keys(memberUpdates).length) {
       await this.rtdb.ref(`/herd/${eventId}/members`).update(memberUpdates);
@@ -358,12 +427,22 @@ export class HerdService {
     state.labels = labels;
     state.total = total;
 
-    const countsJson = JSON.stringify({ counts, total });
+    await this.refreshRegistered(eventId, ctx, state);
+    const { registered, registeredTotal } = state;
+
+    const countsJson = JSON.stringify({
+      counts,
+      total,
+      registered,
+      registeredTotal,
+    });
     if (countsJson !== state.countsJson) {
       state.countsJson = countsJson;
       await this.rtdb.ref(`/herd/${eventId}/live`).set({
         counts,
         total,
+        registered,
+        registeredTotal,
         updatedAt: admin.database.ServerValue.TIMESTAMP,
       });
     }
@@ -380,37 +459,133 @@ export class HerdService {
       return;
     }
 
+    const now = Date.now();
     const every = Math.max(1, pub.milestoneEvery ?? 1);
     const pending = Object.entries(counts).filter(([k, n]) => {
       const last = state.announced.get(k) ?? 0;
       return n > last && Math.floor(n / every) > Math.floor(last / every);
     });
-    if (!pending.length) return;
+    const canGrow =
+      pending.length > 0 &&
+      now - state.lastPublicAt >= (pub.minIntervalSec ?? 20) * 1000;
 
-    const now = Date.now();
-    if (now - state.lastPublicAt < (pub.minIntervalSec ?? 20) * 1000) return;
+    // Repetición periódica: sin llegadas nuevas, recuerda el estado actual de
+    // algún grupo cada repeatEverySec (contado desde el último anuncio)
+    const repeatMs =
+      (pub.repeatEverySec ?? 0) > 0
+        ? Math.max(MIN_REPEAT_SEC, pub.repeatEverySec!) * 1000
+        : 0;
+    const repeatDue =
+      repeatMs > 0 &&
+      now - Math.max(state.lastPublicAt, state.startedAt) >= repeatMs;
+
+    const repeat = !canGrow && repeatDue;
+    const candidates = canGrow
+      ? pending
+      : repeat
+        ? Object.entries(counts).filter(([, n]) => n > 0)
+        : [];
+    if (!candidates.length) return;
 
     // Rota entre grupos: primero el anunciado hace más tiempo; a igualdad, el más grande
-    pending.sort(
+    candidates.sort(
       ([ka, na], [kb, nb]) =>
         (state.lastAnnouncedAt.get(ka) ?? 0) -
           (state.lastAnnouncedAt.get(kb) ?? 0) || nb - na,
     );
-    const [key, count] = pending[0];
-    // Anunciar el hito alcanzado (no el conteo exacto) cuando se usan hitos
-    const shown = every > 1 ? Math.floor(count / every) * every : count;
+    const [key, count] = candidates[0];
+    // Anunciar el hito alcanzado (no el conteo exacto) cuando se usan hitos;
+    // la repetición muestra el conteo actual
+    const shown =
+      !repeat && every > 1 ? Math.floor(count / every) * every : count;
 
-    state.announced.set(key, count);
+    state.announced.set(key, Math.max(state.announced.get(key) ?? 0, count));
     state.lastAnnouncedAt.set(key, now);
     state.lastPublicAt = now;
 
     await this.rtdb.ref(`/herd/${eventId}/public`).set({
       key,
-      label: labels.get(key) ?? key,
+      label: labels.get(key)?.label ?? key,
+      singular: labels.get(key)?.singular ?? key,
       count: shown,
       total,
+      // Nunca menos inscritos que conectados (cambios de grupo, caché)
+      registered: Math.max(registered[key] ?? 0, count),
+      registeredTotal: Math.max(registeredTotal, total),
+      ...(repeat ? { repeat: true } : {}),
       at: admin.database.ServerValue.TIMESTAMP,
     });
+  }
+
+  /**
+   * Inscritos al evento (sin cancelados) por grupo, con la misma canonización
+   * que los conectados. Si falla se conserva el último cálculo.
+   */
+  private async refreshRegistered(
+    eventId: string,
+    ctx: HerdContext,
+    state: HerdState,
+  ) {
+    const now = Date.now();
+    if (now - state.registeredAt < this.REGISTERED_TTL_MS) return;
+    state.registeredAt = now;
+    // El id del campo se usa como ruta en la agregación
+    if (!ctx.fieldId || !/^[\w-]+$/.test(ctx.fieldId)) return;
+    try {
+      const rows: Array<{ _id: unknown; n: number }> =
+        await this.eventUserModel.aggregate([
+          { $match: { eventId, status: { $ne: 'cancelled' } } },
+          {
+            $lookup: {
+              from: this.orgAttendeeModel.collection.name,
+              // $toObjectId tolera registros viejos con attendeeId en texto
+              let: { aid: { $toObjectId: '$attendeeId' } },
+              pipeline: [
+                { $match: { $expr: { $eq: ['$_id', '$aid'] } } },
+                { $project: { v: `$registrationData.${ctx.fieldId}` } },
+              ],
+              as: 'a',
+            },
+          },
+          { $unwind: '$a' },
+          { $group: { _id: '$a.v', n: { $sum: 1 } } },
+        ]);
+
+      const registered: Record<string, number> = {};
+      let registeredTotal = 0;
+      for (const { _id, n } of rows) {
+        registeredTotal += n;
+        const g = ctx.resolve(_id);
+        if (g) registered[g.key] = (registered[g.key] ?? 0) + n;
+      }
+      state.registered = registered;
+      state.registeredTotal = registeredTotal;
+    } catch (e) {
+      this.logger.warn(
+        `No se pudieron contar los inscritos ${eventId}: ${(e as Error).message}`,
+      );
+    }
+  }
+
+  /** Orden de llegada persistido (sobrevive a reinicios del proceso) */
+  private async loadArrivals(
+    eventId: string,
+  ): Promise<Map<string, Map<string, number>>> {
+    const arrivals = new Map<string, Map<string, number>>();
+    try {
+      const snap = await this.rtdb
+        .ref(`/herd/${eventId}/arrivals`)
+        .once('value');
+      const val = (snap.val() ?? {}) as Record<string, Record<string, number>>;
+      for (const [key, byId] of Object.entries(val)) {
+        arrivals.set(key, new Map(Object.entries(byId ?? {})));
+      }
+    } catch (e) {
+      this.logger.warn(
+        `No se pudo leer el orden de llegada ${eventId}: ${(e as Error).message}`,
+      );
+    }
+    return arrivals;
   }
 
   private async resolveGroups(
@@ -497,9 +672,12 @@ export class HerdService {
 
     const payload = {
       key: groupKey,
-      label: state.labels.get(groupKey) ?? groupKey,
+      label: state.labels.get(groupKey)?.label ?? groupKey,
+      singular: state.labels.get(groupKey)?.singular ?? groupKey,
       count,
       total: state.total,
+      registered: Math.max(state.registered[groupKey] ?? 0, count),
+      registeredTotal: Math.max(state.registeredTotal, state.total),
       manual: true,
       ...(text?.trim() ? { text: text.trim() } : {}),
       at: admin.database.ServerValue.TIMESTAMP,
