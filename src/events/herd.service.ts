@@ -15,6 +15,7 @@ import { Event, EventDocument, EventHerdConfig } from './schemas/event.schema';
 import { Organization } from '../organizations/schemas/organization.schema';
 import { OrgAttendee } from '../organizations/schemas/org-attendee.schema';
 import { EventUser } from './schemas/event-user.schema';
+import { ViewingSession } from './schemas/viewing-session.schema';
 import { RtdbService } from '../rtdb/rtdb.service';
 import { UpdateHerdConfigDto } from './dtos/update-herd-config.dto';
 import { herdGroupForms } from './herd-grammar';
@@ -39,7 +40,10 @@ export const herdKey = (s: unknown) =>
     .slice(0, 100) || '_';
 
 export const DEFAULT_HERD_CONFIG: Required<
-  Omit<EventHerdConfig, 'fieldId' | 'groupLabels'>
+  Omit<
+    EventHerdConfig,
+    'fieldId' | 'groupLabels' | 'excludedGroups' | 'holdoutPercent'
+  >
 > = {
   enabled: false,
   accentColor: '#3b82f6',
@@ -60,6 +64,7 @@ export const DEFAULT_HERD_CONFIG: Required<
     template: '¡Ya son {cantidad} {grupo} conectados!',
     position: 'bottom-left',
     durationSec: 6,
+    announceOnGrowth: true,
     minIntervalSec: 20,
     milestoneEvery: 1,
     repeatEverySec: 0,
@@ -73,14 +78,26 @@ const MIN_REPEAT_SEC = 30;
 // label = plural ("endocrinólogos"); singular = "endocrinólogo"
 type Group = { key: string; label: string; singular: string };
 
-/** Grupo propio publicado en /herd/{eventId}/members/{uid} */
-type MemberEntry = Group & { position?: number };
+/**
+ * Grupo propio publicado en /herd/{eventId}/members/{uid}. muted = no ve
+ * ningún mensaje (grupo excluido o grupo de control del experimento)
+ */
+type MemberEntry = Group & { position?: number; muted?: true };
+
+/** Brazo del experimento: t = ve los mensajes, c = grupo de control */
+type Arm = 't' | 'c';
+
+// Quien sigue conectado hasta 5 min antes del fin cuenta como "se quedó hasta el final"
+const UNTIL_END_MARGIN_MS = 5 * 60_000;
 
 /** Contexto por evento: config + resolución valor → grupo, con caché */
 type HerdContext = {
   config: EventHerdConfig;
   fieldId: string | null;
   resolve: (raw: unknown) => Group | null;
+  // Claves de los grupos que no reciben mensajes
+  excludedKeys: Set<string>;
+  holdoutPercent: number;
   loadedAt: number;
 };
 
@@ -102,13 +119,18 @@ type HerdState = {
   announced: Map<string, number>;
   lastAnnouncedAt: Map<string, number>;
   lastPublicAt: number;
+  // Grupos ya repetidos en la vuelta actual (sorteo sin repetir)
+  repeatRound: Set<string>;
   // Inicio del estado: la repetición periódica cuenta desde aquí si aún no
   // hubo anuncio, para no anunciar de golpe al arrancar
   startedAt: number;
   // grupo → (attendeeId → orden de llegada 1, 2, 3…). Se persiste en
   // /herd/{eventId}/arrivals para que un reinicio no repita "eres la primera"
   arrivals: Map<string, Map<string, number>>;
-  // uid → "clave|posición" publicada en /herd/{eventId}/members (null = sin grupo)
+  // attendeeId → brazo del experimento. Se sortea la primera vez que se ve al
+  // asistente y se persiste en /herd/{eventId}/arms (no cambia al volver)
+  arms: Map<string, Arm>;
+  // uid → "clave|posición|muted" publicada en /herd/{eventId}/members (null = sin grupo)
   membersWritten: Map<string, string | null>;
   // UIDs presentes en el flush anterior: los que no estaban acaban de llegar
   activeUids: Set<string>;
@@ -141,6 +163,8 @@ export class HerdService {
     private orgAttendeeModel: Model<OrgAttendee>,
     private rtdb: RtdbService,
     @InjectModel(EventUser.name) private eventUserModel: Model<EventUser>,
+    @InjectModel(ViewingSession.name)
+    private viewingSessionModel?: Model<ViewingSession>,
   ) {}
 
   // ── Configuración ────────────────────────────────────────────────────────
@@ -155,6 +179,8 @@ export class HerdService {
       groupLabels: (dto.groupLabels ?? []).filter(
         (g) => g.label?.trim() || g.singular?.trim(),
       ),
+      excludedGroups: [...new Set(dto.excludedGroups ?? [])],
+      holdoutPercent: dto.holdoutPercent ?? 0,
       accentColor: dto.accentColor || DEFAULT_HERD_CONFIG.accentColor,
       privateMessage: {
         ...DEFAULT_HERD_CONFIG.privateMessage,
@@ -215,6 +241,7 @@ export class HerdService {
         optionLabel: String(o.label ?? o.value),
         label: forms.plural,
         singular: forms.singular,
+        ...(ctx.excludedKeys.has(herdKey(o.value)) ? { excluded: true } : {}),
       };
     });
 
@@ -228,6 +255,7 @@ export class HerdService {
           privateMessage,
           publicMessage,
           groups,
+          holdoutPercent: ctx.holdoutPercent,
           updatedAt: Date.now(),
         }),
       ),
@@ -307,6 +335,8 @@ export class HerdService {
       config,
       fieldId: field ? String(field.id) : null,
       resolve,
+      excludedKeys: new Set((config.excludedGroups ?? []).map(herdKey)),
+      holdoutPercent: Math.min(90, Math.max(0, config.holdoutPercent ?? 0)),
       loadedAt: Date.now(),
     };
     if (prevFieldId !== ctx.fieldId) this.attendeeGroups.delete(eventId);
@@ -348,8 +378,10 @@ export class HerdService {
       announced: new Map(),
       lastAnnouncedAt: new Map(),
       lastPublicAt: 0,
+      repeatRound: new Set(),
       startedAt: Date.now(),
       arrivals: await this.loadArrivals(eventId),
+      arms: await this.loadArms(eventId),
       membersWritten: new Map(),
       activeUids: new Set(),
       counts: {},
@@ -398,6 +430,19 @@ export class HerdService {
       await this.rtdb.ref(`/herd/${eventId}/arrivals`).update(arrivalUpdates);
     }
 
+    // Sorteo del experimento: cada asistente con grupo cae una sola vez en
+    // control (no ve mensajes) o tratamiento, con la probabilidad configurada
+    const armUpdates: Record<string, Arm> = {};
+    for (const id of attendeeIds) {
+      if (!groups.get(id) || state.arms.has(id)) continue;
+      const arm: Arm = Math.random() * 100 < ctx.holdoutPercent ? 'c' : 't';
+      state.arms.set(id, arm);
+      armUpdates[id] = arm;
+    }
+    if (Object.keys(armUpdates).length) {
+      await this.rtdb.ref(`/herd/${eventId}/arms`).update(armUpdates);
+    }
+
     // Grupo propio de cada asistente (y su orden de llegada), para su mensaje
     // privado: así la página no depende de tener el registrationData (según
     // cómo inició sesión puede no tenerlo). Solo se escribe al llegar o si su
@@ -408,8 +453,15 @@ export class HerdService {
       const position = g
         ? state.arrivals.get(g.key)?.get(m.attendeeId)
         : undefined;
-      const entry = g ? { ...g, ...(position ? { position } : {}) } : null;
-      const written = g ? `${g.key}|${position ?? ''}` : null;
+      const muted = !!g && this.isMuted(ctx, state, m.attendeeId, g.key);
+      const entry: MemberEntry | null = g
+        ? {
+            ...g,
+            ...(position ? { position } : {}),
+            ...(muted ? { muted: true as const } : {}),
+          }
+        : null;
+      const written = g ? `${g.key}|${position ?? ''}|${muted ? 1 : 0}` : null;
       if (
         state.membersWritten.has(m.uid) &&
         state.membersWritten.get(m.uid) === written
@@ -454,18 +506,26 @@ export class HerdService {
 
     // Primer flush (arranque del watcher o del proceso): se toma como línea
     // base para no anunciar de golpe a toda la audiencia que ya estaba.
-    if (isFirst || !pub.enabled) {
+    // Sin anuncio al crecer, la marca de agua sigue al conteo: si luego se
+    // activa, no se anuncia de golpe lo acumulado
+    const onGrowth = pub.announceOnGrowth !== false;
+    if (isFirst || !pub.enabled || !onGrowth) {
       for (const [k, n] of Object.entries(counts)) state.announced.set(k, n);
-      return;
+      if (isFirst || !pub.enabled) return;
     }
 
     const now = Date.now();
     const every = Math.max(1, pub.milestoneEvery ?? 1);
-    const pending = Object.entries(counts).filter(([k, n]) => {
+    // Los grupos excluidos nunca se anuncian
+    const announceable = Object.entries(counts).filter(
+      ([k]) => !ctx.excludedKeys.has(k),
+    );
+    const pending = announceable.filter(([k, n]) => {
       const last = state.announced.get(k) ?? 0;
       return n > last && Math.floor(n / every) > Math.floor(last / every);
     });
     const canGrow =
+      onGrowth &&
       pending.length > 0 &&
       now - state.lastPublicAt >= (pub.minIntervalSec ?? 20) * 1000;
 
@@ -483,17 +543,31 @@ export class HerdService {
     const candidates = canGrow
       ? pending
       : repeat
-        ? Object.entries(counts).filter(([, n]) => n > 0)
+        ? announceable.filter(([, n]) => n > 0)
         : [];
     if (!candidates.length) return;
 
-    // Rota entre grupos: primero el anunciado hace más tiempo; a igualdad, el más grande
-    candidates.sort(
-      ([ka, na], [kb, nb]) =>
-        (state.lastAnnouncedAt.get(ka) ?? 0) -
-          (state.lastAnnouncedAt.get(kb) ?? 0) || nb - na,
-    );
-    const [key, count] = candidates[0];
+    let key: string;
+    let count: number;
+    if (repeat) {
+      // Repetición: grupo al azar entre los que aún no salieron en esta
+      // vuelta; cuando todos salieron, empieza otra vuelta
+      let fresh = candidates.filter(([k]) => !state.repeatRound.has(k));
+      if (!fresh.length) {
+        state.repeatRound.clear();
+        fresh = candidates;
+      }
+      [key, count] = fresh[Math.floor(Math.random() * fresh.length)];
+      state.repeatRound.add(key);
+    } else {
+      // Al crecer: primero el anunciado hace más tiempo; a igualdad, el más grande
+      candidates.sort(
+        ([ka, na], [kb, nb]) =>
+          (state.lastAnnouncedAt.get(ka) ?? 0) -
+            (state.lastAnnouncedAt.get(kb) ?? 0) || nb - na,
+      );
+      [key, count] = candidates[0];
+    }
     // Anunciar el hito alcanzado (no el conteo exacto) cuando se usan hitos;
     // la repetición muestra el conteo actual
     const shown =
@@ -567,6 +641,36 @@ export class HerdService {
     }
   }
 
+  /**
+   * ¿El asistente no debe ver mensajes? Su grupo está excluido, o cayó en el
+   * grupo de control mientras el experimento está activo (holdout > 0).
+   */
+  private isMuted(
+    ctx: HerdContext,
+    state: HerdState,
+    attendeeId: string,
+    key: string,
+  ) {
+    return (
+      ctx.excludedKeys.has(key) ||
+      (ctx.holdoutPercent > 0 && state.arms.get(attendeeId) === 'c')
+    );
+  }
+
+  /** Brazos del experimento persistidos (sobreviven a reinicios del proceso) */
+  private async loadArms(eventId: string): Promise<Map<string, Arm>> {
+    try {
+      const snap = await this.rtdb.ref(`/herd/${eventId}/arms`).once('value');
+      const val = (snap.val() ?? {}) as Record<string, Arm>;
+      return new Map(Object.entries(val));
+    } catch (e) {
+      this.logger.warn(
+        `No se pudo leer el experimento ${eventId}: ${(e as Error).message}`,
+      );
+      return new Map();
+    }
+  }
+
   /** Orden de llegada persistido (sobrevive a reinicios del proceso) */
   private async loadArrivals(
     eventId: string,
@@ -633,8 +737,9 @@ export class HerdService {
     text?: string,
   ) {
     const state = this.states.get(eventId);
+    const ctx = await this.getContext(eventId);
     const entries = Object.entries(state?.counts ?? {}).filter(
-      ([, n]) => n > 0,
+      ([k, n]) => n > 0 && !ctx?.excludedKeys.has(k),
     );
     if (!state || !entries.length) {
       throw new BadRequestException(
@@ -686,10 +791,188 @@ export class HerdService {
     return { type, key: groupKey, label: payload.label, count };
   }
 
+  // ── Experimento: ¿los mensajes retienen? ─────────────────────────────────
+
+  /**
+   * Compara la visualización de quienes vieron los mensajes (tratamiento)
+   * contra el grupo de control sorteado, entre los asistentes con grupo que
+   * se conectaron con la manada activa. Los grupos excluidos se reportan
+   * aparte: no son aleatorios, sirven solo como referencia.
+   */
+  async getExperimentReport(eventId: string) {
+    const ctx = await this.getContext(eventId, true);
+    if (!ctx) throw new NotFoundException('Event not found');
+    const event = await this.eventModel
+      .findById(eventId, { endedAt: 1 })
+      .lean();
+    const arms = await this.loadArms(eventId);
+    const attendeeIds = [...arms.keys()];
+
+    // Grupo actual de cada asistente del experimento (para separar excluidos)
+    const groupKey = new Map<string, string | null>();
+    if (attendeeIds.length && ctx.fieldId) {
+      const path = `registrationData.${ctx.fieldId}`;
+      const docs = await this.orgAttendeeModel
+        .find({ _id: { $in: attendeeIds } }, { [path]: 1 })
+        .lean();
+      for (const d of docs as any[]) {
+        groupKey.set(
+          String(d._id),
+          ctx.resolve(d.registrationData?.[ctx.fieldId])?.key ?? null,
+        );
+      }
+    }
+
+    // EventUser → asistente, y visualización acumulada por EventUser
+    const eventUsers = await this.eventUserModel
+      .find({ eventId }, { _id: 1, attendeeId: 1 })
+      .lean();
+    const attendeeByEu = new Map(
+      eventUsers.map((eu) => [String(eu._id), String(eu.attendeeId)]),
+    );
+    const rows: Array<{
+      _id: unknown;
+      playback: number;
+      presence: number;
+      sessions: number;
+      lastSeen: Date;
+    }> = this.viewingSessionModel
+      ? await this.viewingSessionModel.aggregate([
+          { $match: { eventId } },
+          {
+            $group: {
+              _id: '$eventUserId',
+              playback: { $sum: '$playbackTotalSeconds' },
+              presence: { $sum: '$totalWatchTimeSeconds' },
+              sessions: { $sum: 1 },
+              lastSeen: { $max: '$lastHeartbeat' },
+            },
+          },
+        ])
+      : [];
+    const viewing = new Map<string, (typeof rows)[number]>();
+    for (const r of rows) {
+      const aid = attendeeByEu.get(String(r._id));
+      if (aid) viewing.set(aid, r);
+    }
+
+    const endedAt = event?.endedAt ? new Date(event.endedAt).getTime() : null;
+    type Viewer = {
+      playbackMin: number;
+      presenceMin: number;
+      sessions: number;
+      untilEnd: boolean;
+    };
+    const buckets: Record<'treatment' | 'control' | 'excluded', Viewer[]> = {
+      treatment: [],
+      control: [],
+      excluded: [],
+    };
+    for (const [aid, arm] of arms) {
+      const v = viewing.get(aid);
+      const key = groupKey.get(aid);
+      const bucket =
+        key && ctx.excludedKeys.has(key)
+          ? 'excluded'
+          : arm === 'c'
+            ? 'control'
+            : 'treatment';
+      buckets[bucket].push({
+        playbackMin: (v?.playback ?? 0) / 60,
+        presenceMin: (v?.presence ?? 0) / 60,
+        sessions: v?.sessions ?? 0,
+        untilEnd:
+          !!endedAt &&
+          !!v?.lastSeen &&
+          new Date(v.lastSeen).getTime() >= endedAt - UNTIL_END_MARGIN_MS,
+      });
+    }
+
+    const summarize = (list: Viewer[]) => {
+      const n = list.length;
+      const pct = (f: (v: Viewer) => boolean) =>
+        n ? Math.round((list.filter(f).length / n) * 1000) / 10 : 0;
+      const playback = list.map((v) => v.playbackMin);
+      return {
+        attendees: n,
+        avgPlaybackMin: round1(mean(playback)),
+        medianPlaybackMin: round1(median(playback)),
+        avgPresenceMin: round1(mean(list.map((v) => v.presenceMin))),
+        avgSessions: round1(mean(list.map((v) => v.sessions))),
+        watched15Pct: pct((v) => v.playbackMin >= 15),
+        watched30Pct: pct((v) => v.playbackMin >= 30),
+        watched60Pct: pct((v) => v.playbackMin >= 60),
+        untilEndPct: endedAt ? pct((v) => v.untilEnd) : null,
+      };
+    };
+
+    const t = buckets.treatment.map((v) => v.playbackMin);
+    const c = buckets.control.map((v) => v.playbackMin);
+    const diff = mean(t) - mean(c);
+    return {
+      holdoutPercent: ctx.holdoutPercent,
+      eventEnded: !!endedAt,
+      treatment: summarize(buckets.treatment),
+      control: summarize(buckets.control),
+      excluded: summarize(buckets.excluded),
+      // Diferencia de minutos reproducidos (tratamiento − control)
+      lift: {
+        playbackMin: round1(diff),
+        playbackPct:
+          mean(c) > 0 ? Math.round((diff / mean(c)) * 1000) / 10 : null,
+        // p < 0.05 → la diferencia difícilmente es azar
+        pValue: welchPValue(t, c),
+      },
+    };
+  }
+
   /** Libera el estado en memoria de un evento (al apagar su watcher) */
   clearEvent(eventId: string) {
     this.contexts.delete(eventId);
     this.attendeeGroups.delete(eventId);
     this.states.delete(eventId);
   }
+}
+
+// ── Estadística del experimento ─────────────────────────────────────────────
+
+const round1 = (n: number) => Math.round(n * 10) / 10;
+
+const mean = (xs: number[]) =>
+  xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
+
+function median(xs: number[]) {
+  if (!xs.length) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+/** Función de distribución de la normal estándar (aprox. Abramowitz-Stegun) */
+function normalCdf(z: number) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989423 * Math.exp((-z * z) / 2);
+  const p =
+    d *
+    t *
+    (0.3193815 +
+      t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return z > 0 ? 1 - p : p;
+}
+
+/**
+ * Valor p bilateral de la diferencia de medias (prueba de Welch con
+ * aproximación normal; válida con decenas de asistentes por brazo).
+ * null si no hay datos suficientes.
+ */
+export function welchPValue(a: number[], b: number[]): number | null {
+  if (a.length < 2 || b.length < 2) return null;
+  const variance = (xs: number[]) => {
+    const m = mean(xs);
+    return xs.reduce((s, x) => s + (x - m) ** 2, 0) / (xs.length - 1);
+  };
+  const se = Math.sqrt(variance(a) / a.length + variance(b) / b.length);
+  if (!se) return null;
+  const z = (mean(a) - mean(b)) / se;
+  return Math.round(2 * (1 - normalCdf(Math.abs(z))) * 1000) / 1000;
 }

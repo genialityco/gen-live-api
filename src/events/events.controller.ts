@@ -303,6 +303,13 @@ export class EventsController {
     return await this.herd.announceNow(eventId, dto.type, dto.key, dto.text);
   }
 
+  // Retención de quienes vieron los mensajes de manada vs. el grupo de control (dueñ@ del evento)
+  @Get(':eventId/herd/experiment')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async herdExperiment(@Param('eventId') eventId: string) {
+    return await this.herd.getExperimentReport(eventId);
+  }
+
   // Sincroniza en bloque con gen-certificados a los asistentes que ya
   // asistieron en vivo (dueñ@ del evento) — para "recrear/insertar"
   // asistentes después del evento sin depender de que cada uno vuelva a

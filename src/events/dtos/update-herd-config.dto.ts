@@ -139,6 +139,11 @@ class HerdPrivateMessageDto extends HerdMessageDto {
 }
 
 class HerdPublicMessageDto extends HerdMessageDto {
+  // false = no anunciar al crecer un grupo, solo cada repeatEverySec
+  @IsOptional()
+  @IsBoolean()
+  announceOnGrowth?: boolean;
+
   @IsOptional()
   @IsInt()
   @Min(5)
@@ -165,6 +170,20 @@ export class UpdateHerdConfigDto {
   @ValidateNested({ each: true })
   @Type(() => HerdGroupLabelDto)
   groupLabels?: HerdGroupLabelDto[];
+
+  // Valores de las opciones que no reciben mensajes
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(200, { each: true })
+  excludedGroups?: string[];
+
+  // % al azar en el grupo de control (sin mensajes)
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(90)
+  holdoutPercent?: number;
 
   @IsOptional()
   @IsString()

@@ -297,9 +297,41 @@ describe('HerdService', () => {
     await svc.onActiveAttendees('ev1', all);
     jest.setSystemTime(1_000_000 + 122_000);
     await svc.onActiveAttendees('ev1', all);
+    // Orden al azar, pero sin repetir grupo hasta que todos salieron
+    const values = publics().map((w) => w.value);
+    expect(values.every((v) => v.repeat)).toBe(true);
+    expect(values.map((v) => [v.key, v.count]).sort()).toEqual([
+      ['endocrinologia', 2],
+      ['pediatria', 1],
+    ]);
+  });
+
+  it('sin anuncio al crecer, solo anuncia cada repeatEverySec', async () => {
+    jest.useFakeTimers({ now: 1_000_000 });
+    const { svc, writes } = setup({
+      ...baseConfig,
+      excludedGroups: ['pediatria'],
+      publicMessage: {
+        enabled: true,
+        announceOnGrowth: false,
+        repeatEverySec: 60,
+      },
+    });
+    const publics = () => writes.filter((w) => w.path === '/herd/ev1/public');
+
+    await svc.onActiveAttendees('ev1', m(['a1']));
+    jest.setSystemTime(1_000_000 + 30_000);
+    await svc.onActiveAttendees('ev1', m(['a1', 'a2', 'a3'])); // crece: no anuncia
+    expect(publics()).toHaveLength(0);
+
+    jest.setSystemTime(1_000_000 + 61_000);
+    await svc.onActiveAttendees('ev1', m(['a1', 'a2', 'a3']));
+    jest.setSystemTime(1_000_000 + 122_000);
+    await svc.onActiveAttendees('ev1', m(['a1', 'a2', 'a3']));
+    // pediatría está excluida: solo sale endocrinología
     expect(publics().map((w) => w.value)).toMatchObject([
       { key: 'endocrinologia', count: 2, repeat: true },
-      { key: 'pediatria', count: 1, repeat: true },
+      { key: 'endocrinologia', count: 2, repeat: true },
     ]);
   });
 
@@ -326,6 +358,45 @@ describe('HerdService', () => {
     jest.setSystemTime(1_000_000 + 61_000);
     await svc.onActiveAttendees('ev1', m(['a1', 'a2']));
     expect(eventUserModel.aggregate).toHaveBeenCalledTimes(2);
+  });
+
+  it('los grupos excluidos no se anuncian y sus asistentes quedan silenciados', async () => {
+    jest.useFakeTimers({ now: 1_000_000 });
+    const { svc, writes } = setup({
+      ...baseConfig,
+      excludedGroups: ['pediatria'],
+    });
+    await svc.onActiveAttendees('ev1', m(['a1']));
+    await svc.onActiveAttendees('ev1', m(['a1', 'a3']));
+
+    const members = writes.filter((w) => w.path === '/herd/ev1/members');
+    expect(members.at(-1)?.value.ua3).toMatchObject({
+      key: 'pediatria',
+      muted: true,
+    });
+    expect(members[0].value.ua1.muted).toBeUndefined();
+    // pediatría crece de 0 a 1 pero está excluida
+    expect(writes.some((w) => w.path === '/herd/ev1/public')).toBe(false);
+    await expect(
+      svc.announceNow('ev1', 'public', 'pediatria'),
+    ).rejects.toThrow();
+  });
+
+  it('sortea el grupo de control una sola vez y lo silencia', async () => {
+    const random = jest.spyOn(Math, 'random');
+    random.mockReturnValueOnce(0.1).mockReturnValueOnce(0.9);
+    const { svc, writes } = setup({ ...baseConfig, holdoutPercent: 50 });
+    await svc.onActiveAttendees('ev1', m(['a1', 'a3']));
+    // a1 sale y vuelve: no se vuelve a sortear
+    await svc.onActiveAttendees('ev1', m(['a3']));
+    await svc.onActiveAttendees('ev1', m(['a3', 'a1']));
+    random.mockRestore();
+
+    const arms = writes.filter((w) => w.path === '/herd/ev1/arms');
+    expect(arms.map((w) => w.value)).toEqual([{ a1: 'c', a3: 't' }]);
+    const members = writes.filter((w) => w.path === '/herd/ev1/members');
+    expect(members[0].value.ua1.muted).toBe(true);
+    expect(members[0].value.ua3.muted).toBeUndefined();
   });
 
   it('no hace nada si está desactivado', async () => {

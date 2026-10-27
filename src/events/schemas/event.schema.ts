@@ -94,6 +94,13 @@ export interface EventHerdConfig {
   // ("endocrinólogo"); la forma que falte se deduce (herd-grammar.ts) y sin
   // ninguna se usa la etiqueta de la opción
   groupLabels?: Array<{ value: string; label?: string; singular?: string }>;
+  // Opciones del campo (valor) cuyos asistentes no ven ningún mensaje y que
+  // nunca se anuncian en el grupal
+  excludedGroups?: string[];
+  // % de asistentes que, al azar, quedan como grupo de control: no ven ningún
+  // mensaje. La asignación se persiste en /herd/{eventId}/arms para comparar
+  // la retención contra quienes sí los ven (0 = sin experimento)
+  holdoutPercent?: number;
   accentColor?: string;
   privateMessage?: HerdMessageConfig & {
     // Los primeros N de cada grupo en conectarse ven `firstTemplate` con
@@ -103,6 +110,8 @@ export interface EventHerdConfig {
     ordinalGender?: 'f' | 'm'; // f: primera, segunda… · m: primer, segundo…
   };
   publicMessage?: HerdMessageConfig & {
+    // false = solo se anuncia cada repeatEverySec (y a mano), no al crecer
+    announceOnGrowth?: boolean;
     minIntervalSec?: number; // separación mínima entre anuncios públicos
     milestoneEvery?: number; // 1 = cada llegada; 10 = al llegar a 10, 20, 30...
   };
