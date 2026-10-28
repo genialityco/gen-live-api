@@ -9,6 +9,7 @@ import {
   Get,
   Query,
   BadRequestException,
+  ForbiddenException,
   Put,
   UseGuards,
   Req,
@@ -178,6 +179,7 @@ export class LivekitController {
         | 'solo';
       showFrame?: boolean;
       frameUrl?: string;
+      joinRequestsEnabled?: boolean;
     },
   ) {
     if (!body.eventSlug) throw new BadRequestException('eventSlug requerido');
@@ -202,7 +204,11 @@ export class LivekitController {
     // Sync estudio→evento: reflejar el playbackHlsUrl en event.stream para que el
     // endpoint público y los consumidores queden coherentes. syncStreamFromStudio
     // respeta la fase (solo upcoming/live) para no pisar la URL de replay.
-    if (allowSecrets && typeof patch.playbackHlsUrl === 'string' && patch.playbackHlsUrl) {
+    if (
+      allowSecrets &&
+      typeof patch.playbackHlsUrl === 'string' &&
+      patch.playbackHlsUrl
+    ) {
       const url: string = patch.playbackHlsUrl;
       const provider: 'vimeo' | 'mux' | 'gcore' | 'cloudflare' | 'bunny' =
         /vimeo\.com/i.test(url)
@@ -256,6 +262,8 @@ export class LivekitController {
       lastError: cfg.lastError,
       showFrame: !!cfg.showFrame,
       frameUrl: cfg.frameUrl || '',
+      // Configs anteriores al campo no lo tienen: habilitado
+      joinRequestsEnabled: cfg.joinRequestsEnabled !== false,
       // Media library support - dual layer
       activeVisualItemId: cfg.activeVisualItemId || '',
       activeAudioItemId: cfg.activeAudioItemId || '',
@@ -286,6 +294,14 @@ export class LivekitController {
     const uid = req.user.uid;
     const eventSlug = body.eventSlug;
     if (!eventSlug) throw new BadRequestException('eventSlug requerido');
+
+    // El admin puede apagar las solicitudes desde el control del evento
+    const cfg = await this.liveConfig.get(eventSlug).catch(() => null);
+    if (cfg?.joinRequestsEnabled === false) {
+      throw new ForbiddenException(
+        'Las solicitudes para unirse al estudio están desactivadas',
+      );
+    }
 
     const ref = this.rtdb.ref(`/live/${eventSlug}/joinRequests`).push();
     await ref.set({
@@ -400,9 +416,16 @@ export class LivekitController {
   ) {
     const { eventSlug, identity, trackSid, muted } = body;
     if (!eventSlug || !identity || !trackSid) {
-      throw new BadRequestException('eventSlug, identity y trackSid son requeridos');
+      throw new BadRequestException(
+        'eventSlug, identity y trackSid son requeridos',
+      );
     }
-    await this.livekitService.muteParticipantTrack(eventSlug, identity, trackSid, muted);
+    await this.livekitService.muteParticipantTrack(
+      eventSlug,
+      identity,
+      trackSid,
+      muted,
+    );
     return { ok: true };
   }
 
@@ -565,7 +588,6 @@ export class LivekitController {
     });
     return { ok: true };
   }
-
 
   // POST /livekit/media/upload
   @Post('media/upload')

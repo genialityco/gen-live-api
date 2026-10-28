@@ -61,7 +61,10 @@ export class LiveStreamConfig {
   @Prop({ default: '' })
   lastError: string;
 
-  @Prop({ enum: ['gcore', 'mux', 'vimeo', 'cloudflare', 'bunny'], default: 'gcore' })
+  @Prop({
+    enum: ['gcore', 'mux', 'vimeo', 'cloudflare', 'bunny'],
+    default: 'gcore',
+  })
   provider: 'gcore' | 'mux' | 'vimeo' | 'cloudflare' | 'bunny';
 
   @Prop({ default: '' })
@@ -75,6 +78,10 @@ export class LiveStreamConfig {
 
   @Prop({ default: '' })
   frameUrl: string;
+
+  // Botón "Solicitar unirme al estudio" en la página del asistente
+  @Prop({ default: true })
+  joinRequestsEnabled: boolean;
 
   // ===== MEDIA LAYER =====
   @Prop({ default: false })
