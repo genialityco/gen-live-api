@@ -6,11 +6,13 @@ import { pipeline } from 'stream/promises';
 import * as path from 'path';
 import * as os from 'os';
 import * as tar from 'tar';
-import maxmind, { CountryResponse, Reader } from 'maxmind';
+import maxmind, { AsnResponse, CountryResponse, Reader } from 'maxmind';
 
-const EDITION = 'GeoLite2-Country';
+// País (campañas, reportes) y red/operador dueño de la IP (bloqueos de red)
+const EDITIONS = ['GeoLite2-Country', 'GeoLite2-ASN'] as const;
+type Edition = (typeof EDITIONS)[number];
 const DATA_DIR = path.resolve(process.cwd(), 'data', 'geoip');
-const DB_PATH = path.join(DATA_DIR, `${EDITION}.mmdb`);
+const dbPath = (edition: Edition) => path.join(DATA_DIR, `${edition}.mmdb`);
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // re-descargar si la DB tiene más de 7 días
 const UPDATE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // chequeo semanal
 
@@ -18,52 +20,85 @@ export interface GeoCountry {
   iso: string; // código ISO-3166-1 alpha-2, ej: 'CO'
 }
 
+export interface GeoAsn {
+  asn: number; // número de sistema autónomo, ej: 3816
+  org: string; // organización dueña de la red, ej: 'COLOMBIA TELECOMUNICACIONES S.A. ESP BIC'
+}
+
 /**
- * Resuelve IP → país usando la base de datos local de MaxMind (GeoLite2-Country).
- * - Carga el archivo .mmdb en memoria y resuelve localmente (sin llamadas externas por request).
- * - Se auto-descarga/actualiza desde MaxMind si hay `GEOIP_LICENSE_KEY`.
- * - Degrada de forma segura: si no hay key ni archivo, `lookupCountry` devuelve null.
+ * Resuelve IP → país (GeoLite2-Country) y IP → red/operador (GeoLite2-ASN)
+ * usando las bases locales de MaxMind.
+ * - Carga los archivos .mmdb en memoria y resuelve localmente (sin llamadas externas por request).
+ * - Se auto-descargan/actualizan desde MaxMind si hay `GEOIP_LICENSE_KEY`.
+ * - Degrada de forma segura: si no hay key ni archivo, los lookups devuelven null.
  */
 @Injectable()
 export class GeoipService implements OnModuleInit {
   private readonly logger = new Logger(GeoipService.name);
-  private reader: Reader<CountryResponse> | null = null;
+  private countryReader: Reader<CountryResponse> | null = null;
+  private asnReader: Reader<AsnResponse> | null = null;
   private updating = false;
 
   constructor(private readonly config: ConfigService) {}
 
   async onModuleInit(): Promise<void> {
-    await this.loadReader(); // carga el archivo existente si lo hay
+    await this.loadReaders(); // carga los archivos existentes si los hay
     void this.ensureFresh(); // descarga/actualiza en segundo plano, sin bloquear el arranque
     setInterval(() => void this.ensureFresh(), UPDATE_INTERVAL_MS).unref();
   }
 
   /** Resuelve una IP a su país. Devuelve null si no se puede determinar. */
   lookupCountry(ip: string): GeoCountry | null {
-    if (!this.reader || !ip) return null;
+    const res = this.lookup(this.countryReader, ip);
+    const iso = res?.country?.iso_code;
+    return iso ? { iso } : null;
+  }
+
+  /** Resuelve una IP a la red (sistema autónomo) que la anuncia. */
+  lookupAsn(ip: string): GeoAsn | null {
+    const res = this.lookup(this.asnReader, ip);
+    return res?.autonomous_system_number
+      ? {
+          asn: res.autonomous_system_number,
+          org: res.autonomous_system_organization ?? '',
+        }
+      : null;
+  }
+
+  /** Indica si la geolocalización por país está operativa (archivo cargado). */
+  get isReady(): boolean {
+    return this.countryReader !== null;
+  }
+
+  private lookup<T extends CountryResponse | AsnResponse>(
+    reader: Reader<T> | null,
+    ip: string,
+  ): T | null {
+    if (!reader || !ip) return null;
     // Normaliza IPv4 mapeada en IPv6 (ej: '::ffff:181.49.1.1')
     const clean = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
     if (!maxmind.validate(clean)) return null;
     try {
-      const res = this.reader.get(clean);
-      const iso = res?.country?.iso_code;
-      return iso ? { iso } : null;
+      return reader.get(clean);
     } catch {
       return null;
     }
   }
 
-  /** Indica si la geolocalización está operativa (archivo cargado). */
-  get isReady(): boolean {
-    return this.reader !== null;
+  private async loadReaders(): Promise<void> {
+    this.countryReader = await this.open<CountryResponse>('GeoLite2-Country');
+    this.asnReader = await this.open<AsnResponse>('GeoLite2-ASN');
   }
 
-  private async loadReader(): Promise<void> {
+  private async open<T extends CountryResponse | AsnResponse>(
+    edition: Edition,
+  ): Promise<Reader<T> | null> {
     try {
-      this.reader = await maxmind.open<CountryResponse>(DB_PATH);
-      this.logger.log(`Base GeoIP cargada desde ${DB_PATH}`);
+      const reader = await maxmind.open<T>(dbPath(edition));
+      this.logger.log(`Base GeoIP cargada desde ${dbPath(edition)}`);
+      return reader;
     } catch {
-      this.reader = null;
+      return null;
     }
   }
 
@@ -71,7 +106,7 @@ export class GeoipService implements OnModuleInit {
     if (this.updating) return;
     const licenseKey = this.config.get<string>('GEOIP_LICENSE_KEY');
     if (!licenseKey) {
-      if (!this.reader) {
+      if (!this.countryReader) {
         this.logger.warn(
           'GEOIP_LICENSE_KEY no configurada y sin base local: la geolocalización por IP queda deshabilitada.',
         );
@@ -79,34 +114,41 @@ export class GeoipService implements OnModuleInit {
       return;
     }
 
-    let needsUpdate = true;
-    try {
-      const stat = await fs.stat(DB_PATH);
-      needsUpdate = Date.now() - stat.mtimeMs > MAX_AGE_MS;
-    } catch {
-      needsUpdate = true; // no existe → descargar
-    }
-    if (!needsUpdate) return;
-
     this.updating = true;
     try {
-      await this.download(licenseKey);
-      await this.loadReader();
-      this.logger.log('Base GeoIP actualizada desde MaxMind.');
-    } catch (err) {
-      this.logger.error(
-        `No se pudo actualizar la base GeoIP: ${(err as Error).message}`,
-      );
+      let updated = false;
+      for (const edition of EDITIONS) {
+        if (!(await this.isStale(edition))) continue;
+        try {
+          await this.download(licenseKey, edition);
+          updated = true;
+          this.logger.log(`Base GeoIP ${edition} actualizada desde MaxMind.`);
+        } catch (err) {
+          this.logger.error(
+            `No se pudo actualizar la base GeoIP ${edition}: ${(err as Error).message}`,
+          );
+        }
+      }
+      if (updated) await this.loadReaders();
     } finally {
       this.updating = false;
     }
   }
 
-  private async download(licenseKey: string): Promise<void> {
+  private async isStale(edition: Edition): Promise<boolean> {
+    try {
+      const stat = await fs.stat(dbPath(edition));
+      return Date.now() - stat.mtimeMs > MAX_AGE_MS;
+    } catch {
+      return true; // no existe → descargar
+    }
+  }
+
+  private async download(licenseKey: string, edition: Edition): Promise<void> {
     await fs.mkdir(DATA_DIR, { recursive: true });
     const url =
       `https://download.maxmind.com/app/geoip_download` +
-      `?edition_id=${EDITION}&license_key=${encodeURIComponent(licenseKey)}&suffix=tar.gz`;
+      `?edition_id=${edition}&license_key=${encodeURIComponent(licenseKey)}&suffix=tar.gz`;
 
     const res = await fetch(url);
     if (!res.ok || !res.body) {
@@ -124,12 +166,14 @@ export class GeoipService implements OnModuleInit {
       await tar.x({ file: tgzPath, cwd: tmpDir });
 
       const mmdb = await this.findMmdb(tmpDir);
-      if (!mmdb) throw new Error('no se encontró el .mmdb en el paquete descargado');
+      if (!mmdb)
+        throw new Error('no se encontró el .mmdb en el paquete descargado');
 
       // Escritura atómica: copia a archivo temporal y renombra
-      const tmpDb = `${DB_PATH}.tmp`;
+      const target = dbPath(edition);
+      const tmpDb = `${target}.tmp`;
       await fs.copyFile(mmdb, tmpDb);
-      await fs.rename(tmpDb, DB_PATH);
+      await fs.rename(tmpDb, target);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

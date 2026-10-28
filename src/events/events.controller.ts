@@ -33,6 +33,8 @@ import { UpdateCertificatesConfigDto } from './dtos/update-certificates-config.d
 import { UpdateHerdConfigDto } from './dtos/update-herd-config.dto';
 import { AnnounceHerdDto } from './dtos/announce-herd.dto';
 import { HerdService } from './herd.service';
+import { NetworkReportsService } from './network-reports.service';
+import { ReportNetworkBlockDto } from './dtos/report-network-block.dto';
 import { RegisterToEventDto } from './dtos/register-to-event.dto';
 import { TransferEventDto } from './dtos/transfer-event.dto';
 import { FindRegistrationDto } from './dtos/find-registration.dto';
@@ -50,6 +52,7 @@ export class EventsController {
     private emailCampaigns: EmailCampaignService,
     private waCampaigns: WaCampaignService,
     private herd: HerdService,
+    private networkReports: NetworkReportsService,
   ) {}
 
   // ENDPOINTS PÚBLICOS (sin autenticación)
@@ -308,6 +311,34 @@ export class EventsController {
   @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
   async herdExperiment(@Param('eventId') eventId: string) {
     return await this.herd.getExperimentReport(eventId);
+  }
+
+  // La página del asistente reporta que su red bloquea el servidor del video
+  @Post(':eventId/network-reports')
+  @UseGuards(FirebaseAuthGuard)
+  async reportNetworkBlock(
+    @Param('eventId') eventId: string,
+    @Body() dto: ReportNetworkBlockDto,
+    @Req() req: any,
+  ) {
+    const ip =
+      String(req.headers['x-forwarded-for'] ?? '')
+        .split(',')[0]
+        .trim() || String(req.socket?.remoteAddress ?? '');
+    return await this.networkReports.report(
+      eventId,
+      req.user.uid,
+      dto,
+      ip,
+      String(req.headers['user-agent'] ?? ''),
+    );
+  }
+
+  // Resumen de bloqueos de red del evento (dueñ@ del evento)
+  @Get(':eventId/network-reports')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async networkReportsSummary(@Param('eventId') eventId: string) {
+    return await this.networkReports.summary(eventId);
   }
 
   // Sincroniza en bloque con gen-certificados a los asistentes que ya
