@@ -155,6 +155,9 @@ export class HerdService {
   private states = new Map<string, HerdState>();
   // Serializa el procesamiento por evento (flushes solapados del watcher)
   private chains = new Map<string, Promise<void>>();
+  // Eventos en diferido: la página del asistente no pinta la manada, así que
+  // no se cuenta, no se sortea ni se anuncia (ensuciaría el experimento)
+  private replayEvents = new Set<string>();
 
   constructor(
     @InjectModel(Event.name) private eventModel: Model<EventDocument>,
@@ -349,9 +352,18 @@ export class HerdService {
   /**
    * Llamado por ViewingMetricsService en cada flush de presencia con los
    * asistentes activos (registrados) del evento. No lanza: los errores se
-   * registran para no afectar las métricas.
+   * registran para no afectar las métricas. Con `isReplay` no hace nada.
    */
-  onActiveAttendees(eventId: string, members: HerdMember[]): Promise<void> {
+  onActiveAttendees(
+    eventId: string,
+    members: HerdMember[],
+    isReplay = false,
+  ): Promise<void> {
+    if (isReplay) {
+      this.replayEvents.add(eventId);
+      return Promise.resolve();
+    }
+    this.replayEvents.delete(eventId);
     const prev = this.chains.get(eventId) ?? Promise.resolve();
     const next = prev
       .then(() => this.process(eventId, members))
@@ -736,6 +748,11 @@ export class HerdService {
     key?: string,
     text?: string,
   ) {
+    if (this.replayEvents.has(eventId)) {
+      throw new BadRequestException(
+        'El evento está en diferido: los anuncios de manada solo se muestran en vivo',
+      );
+    }
     const state = this.states.get(eventId);
     const ctx = await this.getContext(eventId);
     const entries = Object.entries(state?.counts ?? {}).filter(
@@ -796,8 +813,10 @@ export class HerdService {
   /**
    * Compara la visualización de quienes vieron los mensajes (tratamiento)
    * contra el grupo de control sorteado, entre los asistentes con grupo que
-   * se conectaron con la manada activa. Los grupos excluidos se reportan
-   * aparte: no son aleatorios, sirven solo como referencia.
+   * estuvieron conectados con el evento en vivo (los mensajes solo se pintan
+   * en vivo: quien solo vio el diferido o se fue antes de empezar no pudo
+   * verlos). Los grupos excluidos se reportan aparte: no son aleatorios,
+   * sirven solo como referencia.
    */
   async getExperimentReport(eventId: string) {
     const ctx = await this.getContext(eventId, true);
@@ -836,6 +855,7 @@ export class HerdService {
       presence: number;
       sessions: number;
       lastSeen: Date;
+      wasLive: boolean;
     }> = this.viewingSessionModel
       ? await this.viewingSessionModel.aggregate([
           { $match: { eventId } },
@@ -846,6 +866,7 @@ export class HerdService {
               presence: { $sum: '$totalWatchTimeSeconds' },
               sessions: { $sum: 1 },
               lastSeen: { $max: '$lastHeartbeat' },
+              wasLive: { $max: '$wasLiveDuringSession' },
             },
           },
         ])
@@ -868,8 +889,13 @@ export class HerdService {
       control: [],
       excluded: [],
     };
+    let notLive = 0;
     for (const [aid, arm] of arms) {
       const v = viewing.get(aid);
+      if (!v?.wasLive) {
+        notLive++;
+        continue;
+      }
       const key = groupKey.get(aid);
       const bucket =
         key && ctx.excludedKeys.has(key)
@@ -912,6 +938,8 @@ export class HerdService {
     return {
       holdoutPercent: ctx.holdoutPercent,
       eventEnded: !!endedAt,
+      // Sorteados que nunca estuvieron en vivo: fuera de la comparación
+      notLive,
       treatment: summarize(buckets.treatment),
       control: summarize(buckets.control),
       excluded: summarize(buckets.excluded),
@@ -931,6 +959,7 @@ export class HerdService {
     this.contexts.delete(eventId);
     this.attendeeGroups.delete(eventId);
     this.states.delete(eventId);
+    this.replayEvents.delete(eventId);
   }
 }
 

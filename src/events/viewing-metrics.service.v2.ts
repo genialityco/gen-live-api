@@ -233,7 +233,7 @@ export class ViewingMetricsService {
     if (initialActiveUIDs.length === 0) {
       // Todos los usuarios se fueron — resetear contador a 0
       await this._persistMetrics(eventId, new Set(), isLive);
-      void this.herdService.onActiveAttendees(eventId, []);
+      void this.herdService.onActiveAttendees(eventId, [], isReplay);
       return;
     }
 
@@ -305,7 +305,7 @@ export class ViewingMetricsService {
     if (registeredUIDs.length === 0) {
       // No hay usuarios registrados — persistir 0 concurrentes sin query adicional
       await this._persistMetrics(eventId, new Set(), isLive);
-      void this.herdService.onActiveAttendees(eventId, []);
+      void this.herdService.onActiveAttendees(eventId, [], isReplay);
       return;
     }
 
@@ -454,13 +454,15 @@ export class ViewingMetricsService {
 
     await this._persistMetrics(eventId, activeEventUserIds, isLive);
 
-    // Anuncios de manada: conteos por grupo del registro (sin bloquear el flush)
+    // Anuncios de manada: conteos por grupo del registro (sin bloquear el
+    // flush). En diferido no se pintan, así que el servicio no hace nada.
     void this.herdService.onActiveAttendees(
       eventId,
       registeredUIDs.map((uid) => ({
         uid,
         attendeeId: String(eventUserMap.get(uid)!.attendeeId),
       })),
+      isReplay,
     );
   }
 

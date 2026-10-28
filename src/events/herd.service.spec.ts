@@ -405,6 +405,68 @@ describe('HerdService', () => {
     expect(writes).toHaveLength(0);
   });
 
+  it('en diferido no cuenta, no sortea ni deja anunciar a mano', async () => {
+    const { svc, writes } = setup({ ...baseConfig, holdoutPercent: 50 });
+    await svc.onActiveAttendees('ev1', m(['a1']));
+    const before = writes.length;
+
+    await svc.onActiveAttendees('ev1', m(['a1', 'a2', 'a3']), true);
+    expect(writes).toHaveLength(before);
+    await expect(svc.announceNow('ev1', 'public')).rejects.toThrow(/diferido/);
+
+    // Si vuelve a vivo, retoma
+    await svc.onActiveAttendees('ev1', m(['a1', 'a2', 'a3']));
+    await expect(svc.announceNow('ev1', 'public')).resolves.toBeDefined();
+  });
+
+  it('el experimento solo compara a quienes estuvieron en vivo', async () => {
+    const { svc, stored, eventUserModel } = setup({
+      ...baseConfig,
+      holdoutPercent: 50,
+    });
+    stored['/herd/ev1/arms'] = { a1: 't', a2: 'c', a3: 't', a4: 'c' };
+    (eventUserModel as any).find = jest.fn(() =>
+      lean(
+        ['a1', 'a2', 'a3', 'a4'].map((a) => ({ _id: 'eu' + a, attendeeId: a })),
+      ),
+    );
+    // a3 solo vio el diferido; a4 nunca reprodujo
+    const rows = [
+      {
+        _id: 'eua1',
+        playback: 1200,
+        presence: 1300,
+        sessions: 1,
+        lastSeen: new Date(),
+        wasLive: true,
+      },
+      {
+        _id: 'eua2',
+        playback: 600,
+        presence: 700,
+        sessions: 1,
+        lastSeen: new Date(),
+        wasLive: true,
+      },
+      {
+        _id: 'eua3',
+        playback: 3000,
+        presence: 3000,
+        sessions: 1,
+        lastSeen: new Date(),
+        wasLive: false,
+      },
+    ];
+    (svc as any).viewingSessionModel = {
+      aggregate: jest.fn(() => Promise.resolve(rows)),
+    };
+
+    const r = await svc.getExperimentReport('ev1');
+    expect(r.notLive).toBe(2);
+    expect(r.treatment).toMatchObject({ attendees: 1, avgPlaybackMin: 20 });
+    expect(r.control).toMatchObject({ attendees: 1, avgPlaybackMin: 10 });
+  });
+
   it('herdKey produce claves válidas para RTDB', () => {
     expect(herdKey(' Médico.Gen#eral [x] ')).toBe('medico_gen_eral _x_');
   });
