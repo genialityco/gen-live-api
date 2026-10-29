@@ -19,7 +19,8 @@ export class CloudflareStreamService {
   private readonly apiToken = process.env.CLOUDFLARE_API_TOKEN ?? '';
   private readonly baseUrl = 'https://api.cloudflare.com/client/v4';
 
-  private get enabled(): boolean {
+  /** ¿Hay credenciales (CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN)? */
+  get enabled(): boolean {
     return !!this.accountId && !!this.apiToken;
   }
 

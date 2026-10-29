@@ -125,6 +125,8 @@ export class LivekitController {
       );
     }
 
+    const previousUrl = (await this.liveConfig.getFresh(body.eventSlug))
+      ?.playbackHlsUrl;
     const m = await this.muxService.createLiveStream();
     const cfg = await this.liveConfig.update(body.eventSlug, {
       provider: 'mux',
@@ -142,10 +144,11 @@ export class LivekitController {
     // setConfig más abajo, misma lógica para la vía de edición manual).
     if (m.playbackHlsUrl) {
       try {
-        await this.eventsService.syncStreamFromStudio(body.eventSlug, {
-          url: m.playbackHlsUrl,
-          provider: 'mux',
-        });
+        await this.eventsService.syncStreamFromStudio(
+          body.eventSlug,
+          { url: m.playbackHlsUrl, provider: 'mux' },
+          previousUrl,
+        );
       } catch {
         // No bloquear el aprovisionamiento si el sync al evento falla
       }
@@ -222,6 +225,10 @@ export class LivekitController {
       if (uid) patch.providerStreamId = uid;
     }
 
+    const previousUrl =
+      typeof patch.playbackHlsUrl === 'string'
+        ? (await this.liveConfig.getFresh(body.eventSlug))?.playbackHlsUrl
+        : undefined;
     const saved = await this.liveConfig.update(body.eventSlug, patch);
 
     // Sync estudio→evento: reflejar el playbackHlsUrl en event.stream para que el
@@ -233,10 +240,11 @@ export class LivekitController {
       patch.playbackHlsUrl
     ) {
       try {
-        await this.eventsService.syncStreamFromStudio(body.eventSlug, {
-          url: patch.playbackHlsUrl,
-          provider: saved.provider,
-        });
+        await this.eventsService.syncStreamFromStudio(
+          body.eventSlug,
+          { url: patch.playbackHlsUrl, provider: saved.provider },
+          previousUrl,
+        );
       } catch {
         // No bloquear el guardado de config si el sync al evento falla
       }
@@ -828,6 +836,22 @@ export class LivekitController {
         assets: [],
         message:
           'Este evento no tiene un stream de Mux o Cloudflare Stream provisionado.',
+      };
+    }
+
+    // Sin credenciales de Cloudflare no se pueden leer grabaciones: decirlo
+    // como error (antes era ok:true con lista vacía, que parecía "sin
+    // grabaciones").
+    if (
+      cfg.provider === 'cloudflare' &&
+      !this.cloudflareStreamService.enabled
+    ) {
+      return {
+        ok: false,
+        provider: cfg.provider,
+        assets: [],
+        message:
+          'Cloudflare Stream no está configurado en el servidor (faltan CLOUDFLARE_ACCOUNT_ID y CLOUDFLARE_API_TOKEN).',
       };
     }
 

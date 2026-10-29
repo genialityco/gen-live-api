@@ -1029,6 +1029,12 @@ export class EventsService implements OnModuleInit {
    * intactas.
    * Respeta la fase: el filtro de status garantiza que solo se actualiza en
    * upcoming/live, así no se pisa la URL de repetición (replay/ended).
+   *
+   * `previousUrl` es la URL del vivo que tenía el estudio antes del cambio:
+   * también se quita, aunque sea de otro proveedor, para que cambiar de
+   * proveedor en el estudio reemplace la fuente del vivo en vez de
+   * acumularla (antes quedaban Mux → Vimeo → … y en repetición se mostraba
+   * primero una URL de vivo ya muerta).
    */
   async syncStreamFromStudio(
     eventSlug: string,
@@ -1036,6 +1042,7 @@ export class EventsService implements OnModuleInit {
       url: string;
       provider: 'vimeo' | 'mux' | 'gcore' | 'cloudflare' | 'bunny';
     },
+    previousUrl?: string | null,
   ) {
     if (!eventSlug || !payload.url) return null;
     const filter = { slug: eventSlug, status: { $in: ['upcoming', 'live'] } };
@@ -1045,6 +1052,11 @@ export class EventsService implements OnModuleInit {
     await this.model.updateOne(filter, {
       $pull: { streams: { provider: payload.provider } },
     });
+    if (previousUrl && previousUrl !== payload.url) {
+      await this.model.updateOne(filter, {
+        $pull: { streams: { url: previousUrl } },
+      });
+    }
 
     const ev = await this.model
       .findOneAndUpdate(
