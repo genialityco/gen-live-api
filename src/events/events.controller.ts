@@ -34,6 +34,8 @@ import { UpdateHerdConfigDto } from './dtos/update-herd-config.dto';
 import { AnnounceHerdDto } from './dtos/announce-herd.dto';
 import { HerdService } from './herd.service';
 import { NetworkReportsService } from './network-reports.service';
+import { HerdGreetingService } from './herd-greeting.service';
+import { HerdGreetingActionDto } from './dtos/herd-greeting-action.dto';
 import { ReportNetworkBlockDto } from './dtos/report-network-block.dto';
 import { RegisterToEventDto } from './dtos/register-to-event.dto';
 import { TransferEventDto } from './dtos/transfer-event.dto';
@@ -53,6 +55,7 @@ export class EventsController {
     private waCampaigns: WaCampaignService,
     private herd: HerdService,
     private networkReports: NetworkReportsService,
+    private herdGreetings: HerdGreetingService,
   ) {}
 
   // ENDPOINTS PÚBLICOS (sin autenticación)
@@ -311,6 +314,25 @@ export class EventsController {
   @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
   async herdExperiment(@Param('eventId') eventId: string) {
     return await this.herd.getExperimentReport(eventId);
+  }
+
+  // Saludo entre colegas: el asistente registra que vio su anuncio, saluda a
+  // su grupo o devuelve un saludo (ver HerdGreetingService)
+  @Post(':eventId/herd/greetings')
+  @UseGuards(FirebaseAuthGuard)
+  async herdGreeting(
+    @Param('eventId') eventId: string,
+    @Body() dto: HerdGreetingActionDto,
+    @Req() req: any,
+  ) {
+    return await this.herdGreetings.act(eventId, String(req.user.uid), dto);
+  }
+
+  // Métricas del saludo entre colegas (dueñ@ del evento)
+  @Get(':eventId/herd/greetings/report')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async herdGreetingReport(@Param('eventId') eventId: string) {
+    return await this.herdGreetings.report(eventId);
   }
 
   // La página del asistente reporta que su red bloquea el servidor del video

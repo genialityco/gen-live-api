@@ -26,6 +26,11 @@ import { PollController } from './poll.controller';
 import { ViewingMetricsService } from './viewing-metrics.service.v2';
 import { HerdService } from './herd.service';
 import { NetworkReportsService } from './network-reports.service';
+import { HerdGreetingService } from './herd-greeting.service';
+import {
+  HerdGreeting,
+  HerdGreetingSchema,
+} from './schemas/herd-greeting.schema';
 import {
   NetworkBlockReport,
   NetworkBlockReportSchema,
@@ -63,6 +68,7 @@ import { Logger } from '@nestjs/common';
       { name: OrgAttendee.name, schema: OrgAttendeeSchema },
       { name: UserAccount.name, schema: UserAccountSchema },
       { name: NetworkBlockReport.name, schema: NetworkBlockReportSchema },
+      { name: HerdGreeting.name, schema: HerdGreetingSchema },
     ]),
     RtdbModule,
     forwardRef(() => OrganizationsModule),
@@ -79,6 +85,7 @@ import { Logger } from '@nestjs/common';
     PollService,
     HerdService,
     NetworkReportsService,
+    HerdGreetingService,
   ],
   controllers: [EventsController, EventUserController, PollController],
   exports: [

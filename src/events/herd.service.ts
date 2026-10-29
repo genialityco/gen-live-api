@@ -70,7 +70,32 @@ export const DEFAULT_HERD_CONFIG: Required<
     repeatEverySec: 0,
     repeatTemplate: '',
   },
+  greeting: {
+    enabled: false,
+    position: 'bottom-right',
+    durationSec: 6,
+    cooldownSec: 60,
+    holdoutPercent: 0,
+  },
 };
+
+/**
+ * ¿Este asistente ve el botón «👋 Saludar»? Sorteo determinista por evento y
+ * asistente (FNV-1a): no hay que persistirlo y el informe lo recalcula igual.
+ */
+export function greetingHasButton(
+  eventId: string,
+  attendeeId: string,
+  holdoutPercent = 0,
+): boolean {
+  if (holdoutPercent <= 0) return true;
+  let h = 0x811c9dc5;
+  for (const ch of `${eventId}:${attendeeId}:greet`) {
+    h ^= ch.charCodeAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h % 100 >= holdoutPercent;
+}
 
 // Repetición mínima: los flushes de presencia llegan cada ~15 s (heartbeats)
 const MIN_REPEAT_SEC = 30;
@@ -82,7 +107,7 @@ type Group = { key: string; label: string; singular: string };
  * Grupo propio publicado en /herd/{eventId}/members/{uid}. muted = no ve
  * ningún mensaje (grupo excluido o grupo de control del experimento)
  */
-type MemberEntry = Group & { position?: number; muted?: true };
+type MemberEntry = Group & { position?: number; muted?: true; greet?: true };
 
 /** Brazo del experimento: t = ve los mensajes, c = grupo de control */
 type Arm = 't' | 'c';
@@ -193,6 +218,10 @@ export class HerdService {
         ...DEFAULT_HERD_CONFIG.publicMessage,
         ...(dto.publicMessage ?? {}),
       },
+      greeting: {
+        ...DEFAULT_HERD_CONFIG.greeting,
+        ...(dto.greeting ?? {}),
+      },
     };
 
     const updated = await this.eventModel
@@ -249,6 +278,10 @@ export class HerdService {
     });
 
     const { enabled, accentColor, privateMessage, publicMessage } = ctx.config;
+    const greeting = {
+      ...DEFAULT_HERD_CONFIG.greeting,
+      ...(ctx.config.greeting ?? {}),
+    };
     await this.rtdb.ref(`/herd/${eventId}/config`).set(
       JSON.parse(
         JSON.stringify({
@@ -257,6 +290,7 @@ export class HerdService {
           accentColor,
           privateMessage,
           publicMessage,
+          greeting,
           groups,
           holdoutPercent: ctx.holdoutPercent,
           updatedAt: Date.now(),
@@ -466,14 +500,28 @@ export class HerdService {
         ? state.arrivals.get(g.key)?.get(m.attendeeId)
         : undefined;
       const muted = !!g && this.isMuted(ctx, state, m.attendeeId, g.key);
+      // Botón «👋 Saludar» en su anuncio individual (saludo activo y en el
+      // brazo con botón del experimento del saludo)
+      const greet =
+        !!g &&
+        !muted &&
+        !!ctx.config.greeting?.enabled &&
+        greetingHasButton(
+          eventId,
+          m.attendeeId,
+          ctx.config.greeting?.holdoutPercent ?? 0,
+        );
       const entry: MemberEntry | null = g
         ? {
             ...g,
             ...(position ? { position } : {}),
             ...(muted ? { muted: true as const } : {}),
+            ...(greet ? { greet: true as const } : {}),
           }
         : null;
-      const written = g ? `${g.key}|${position ?? ''}|${muted ? 1 : 0}` : null;
+      const written = g
+        ? `${g.key}|${position ?? ''}|${muted ? 1 : 0}|${greet ? 1 : 0}`
+        : null;
       if (
         state.membersWritten.has(m.uid) &&
         state.membersWritten.get(m.uid) === written
@@ -951,6 +999,19 @@ export class HerdService {
         // p < 0.05 → la diferencia difícilmente es azar
         pValue: welchPValue(t, c),
       },
+    };
+  }
+
+  /** Config, grupos excluidos y resolución de grupo (para el informe del saludo) */
+  async contextFor(eventId: string) {
+    const ctx = await this.getContext(eventId);
+    if (!ctx) return null;
+    return {
+      config: ctx.config,
+      fieldId: ctx.fieldId,
+      excludedKeys: ctx.excludedKeys,
+      resolve: ctx.resolve,
+      arms: await this.loadArms(eventId),
     };
   }
 

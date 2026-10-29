@@ -115,6 +115,18 @@ export interface EventHerdConfig {
     minIntervalSec?: number; // separación mínima entre anuncios públicos
     milestoneEvery?: number; // 1 = cada llegada; 10 = al llegar a 10, 20, 30...
   };
+  // Saludo entre colegas: el anuncio individual trae un botón «👋 Saludar»
+  // que avisa a los demás conectados del mismo grupo, y quien lo recibe puede
+  // devolverlo. Se mide en la colección herd_greetings.
+  greeting?: {
+    enabled?: boolean;
+    position?: string; // dónde aparece el saludo recibido (posiciones de manada)
+    durationSec?: number;
+    cooldownSec?: number; // espera mínima entre saludos de una misma persona
+    // % de asistentes (con mensajes) que al azar no ven el botón: compara su
+    // permanencia contra quienes sí lo ven (0 = sin experimento)
+    holdoutPercent?: number;
+  };
 }
 
 @Schema({ timestamps: true })

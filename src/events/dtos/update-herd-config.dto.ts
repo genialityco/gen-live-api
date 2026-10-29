@@ -157,6 +157,35 @@ class HerdPublicMessageDto extends HerdMessageDto {
   milestoneEvery?: number;
 }
 
+class HerdGreetingDto {
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+
+  @IsOptional()
+  @IsIn(HERD_POSITIONS)
+  position?: (typeof HERD_POSITIONS)[number];
+
+  @IsOptional()
+  @IsInt()
+  @Min(3)
+  @Max(30)
+  durationSec?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(10)
+  @Max(3600)
+  cooldownSec?: number;
+
+  // % al azar sin botón (experimento del saludo)
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(90)
+  holdoutPercent?: number;
+}
+
 export class UpdateHerdConfigDto {
   @IsBoolean()
   enabled!: boolean;
@@ -199,4 +228,9 @@ export class UpdateHerdConfigDto {
   @ValidateNested()
   @Type(() => HerdPublicMessageDto)
   publicMessage?: HerdPublicMessageDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => HerdGreetingDto)
+  greeting?: HerdGreetingDto;
 }

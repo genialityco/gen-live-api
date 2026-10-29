@@ -3,7 +3,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 /* eslint-disable @typescript-eslint/no-unsafe-call */
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
-import { HerdService, herdKey } from './herd.service';
+import { greetingHasButton, HerdService, herdKey } from './herd.service';
 
 jest.mock('firebase-admin', () => ({
   database: { ServerValue: { TIMESTAMP: 'TS' } },
@@ -469,5 +469,15 @@ describe('HerdService', () => {
 
   it('herdKey produce claves válidas para RTDB', () => {
     expect(herdKey(' Médico.Gen#eral [x] ')).toBe('medico_gen_eral _x_');
+  });
+
+  it('el botón de saludo se sortea de forma determinista y en la proporción configurada', () => {
+    expect(greetingHasButton('ev1', 'a1', 0)).toBe(true);
+    const ids = Array.from({ length: 2000 }, (_, i) => `att${i}`);
+    const withButton = ids.filter((id) => greetingHasButton('ev1', id, 30)).length;
+    expect(withButton / ids.length).toBeGreaterThan(0.65);
+    expect(withButton / ids.length).toBeLessThan(0.75);
+    // Mismo asistente, mismo resultado
+    expect(ids.every((id) => greetingHasButton('ev1', id, 30) === greetingHasButton('ev1', id, 30))).toBe(true);
   });
 });
