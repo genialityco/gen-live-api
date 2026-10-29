@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import {
   Injectable,
   NotFoundException,
@@ -12,8 +11,9 @@ import {
   LiveStreamConfig,
   LiveStreamConfigDocument,
 } from './schemas/live-stream-config.schema';
-import { MuxService } from './mux.service';
 import { EventsService } from '../events/events.service';
+
+export type StreamProviderId = LiveStreamConfig['provider'];
 
 @Injectable()
 export class LiveConfigService {
@@ -23,74 +23,49 @@ export class LiveConfigService {
    * Caché en memoria para LiveStreamConfig por eventSlug.
    * Reduce las queries a MongoDB cuando N usuarios solicitan la URL de playback
    * de forma simultánea (p.ej. al inicio del evento con 1500 asistentes).
+   * `null` = el evento no tiene config (también se cachea).
    */
   private readonly configCache = new Map<
     string,
-    { cfg: LiveStreamConfig; expiresAt: number }
+    { cfg: LiveStreamConfig | null; expiresAt: number }
   >();
   private readonly CONFIG_CACHE_TTL_MS = 30_000; // 30 segundos
 
   constructor(
     @InjectModel(LiveStreamConfig.name)
     private readonly model: Model<LiveStreamConfigDocument>,
-    private readonly mux: MuxService,
     @Inject(forwardRef(() => EventsService))
     private readonly eventsService: EventsService,
   ) {}
 
-  private isMuxUrl(
-    cfg: Pick<LiveStreamConfig, 'rtmpServerUrl' | 'playbackHlsUrl'>,
-  ) {
-    return (
-      /mux\.com/i.test(cfg.rtmpServerUrl || '') ||
-      /stream\.mux\.com/i.test(cfg.playbackHlsUrl || '')
-    );
-  }
-
-  private isGcoreUrl(
-    cfg: Pick<LiveStreamConfig, 'rtmpServerUrl' | 'playbackHlsUrl'>,
-  ) {
-    return (
-      /gvideo\.co/i.test(cfg.rtmpServerUrl || '') ||
-      /gvideo\.io/i.test(cfg.playbackHlsUrl || '')
-    );
-  }
-
-  private isVimeoUrl(
-    cfg: Pick<LiveStreamConfig, 'rtmpServerUrl' | 'playbackHlsUrl'>,
-  ) {
-    return (
-      /vimeo\.com/i.test(cfg.rtmpServerUrl || '') ||
-      /vimeo\.com/i.test(cfg.playbackHlsUrl || '')
-    );
-  }
-
-  private isCloudflareUrl(
-    cfg: Pick<LiveStreamConfig, 'rtmpServerUrl' | 'playbackHlsUrl'>,
-  ) {
-    return (
-      /live\.cloudflare\.com/i.test(cfg.rtmpServerUrl || '') ||
-      /cloudflarestream\.com/i.test(cfg.playbackHlsUrl || '')
-    );
-  }
-
-  private isBunnyUrl(
-    cfg: Pick<LiveStreamConfig, 'rtmpServerUrl' | 'playbackHlsUrl'>,
-  ) {
-    return (
-      /mediadelivery\.net/i.test(cfg.rtmpServerUrl || '') ||
-      /mediadelivery\.net|b-cdn\.net/i.test(cfg.playbackHlsUrl || '')
-    );
+  /**
+   * Proveedor según una URL de reproducción o de ingesta (null si no se
+   * reconoce: p. ej. un pull zone propio de Bunny). Gcore quedó como legado:
+   * no se ofrece en el estudio, pero se sigue reconociendo en configs viejas.
+   */
+  static providerFromUrl(url?: string | null): StreamProviderId | null {
+    if (!url) return null;
+    if (/mux\.com/i.test(url)) return 'mux';
+    if (/vimeo\.com/i.test(url)) return 'vimeo';
+    if (
+      /cloudflarestream\.com|videodelivery\.net|live\.cloudflare\.com/i.test(
+        url,
+      )
+    )
+      return 'cloudflare';
+    if (/mediadelivery\.net|b-cdn\.net/i.test(url)) return 'bunny';
+    if (/gvideo\.(co|io)/i.test(url)) return 'gcore';
+    return null;
   }
 
   /**
-   * Reprovisiona Mux si el config está vacío o apunta a Gcore.
-   * NO reprovisiona si ya es Mux, Vimeo o Cloudflare (credenciales manuales).
+   * Devuelve la config del estudio, creándola vacía si no existe. Ya NO
+   * aprovisiona Mux por su cuenta: crear la transmisión en Mux es explícito
+   * (POST /livekit/provision, botón del estudio). Solo la usa el panel del
+   * estudio (ruta protegida para el dueñ@ del evento).
    */
   async getOrCreate(eventSlug: string) {
-    // 1) crea doc si no existe
     let cfg = await this.model.findOne({ eventSlug });
-
     if (!cfg) {
       cfg = await this.model.create({
         eventSlug,
@@ -98,101 +73,26 @@ export class LiveConfigService {
         layout: 'speaker',
         maxParticipants: 20,
         status: 'idle',
-        provider: 'mux',
+        provider: 'vimeo',
       });
-    }
-
-    // 2) Normaliza provider según las URLs (para coherencia con credenciales manuales)
-    const urlSaysMux = this.isMuxUrl(cfg);
-    const urlSaysGcore = this.isGcoreUrl(cfg);
-    const urlSaysVimeo = this.isVimeoUrl(cfg);
-    const urlSaysCloudflare = this.isCloudflareUrl(cfg);
-    const urlSaysBunny = this.isBunnyUrl(cfg);
-
-    if (urlSaysMux && cfg.provider !== 'mux') {
-      await this.model.updateOne({ eventSlug }, { $set: { provider: 'mux' } });
-      cfg.provider = 'mux' as any;
-    } else if (urlSaysGcore && cfg.provider !== 'gcore') {
-      await this.model.updateOne(
-        { eventSlug },
-        { $set: { provider: 'gcore' } },
-      );
-      cfg.provider = 'gcore' as any;
-    } else if (urlSaysVimeo && cfg.provider !== 'vimeo') {
-      await this.model.updateOne(
-        { eventSlug },
-        { $set: { provider: 'vimeo' } },
-      );
-      cfg.provider = 'vimeo' as any;
-    } else if (urlSaysCloudflare && cfg.provider !== 'cloudflare') {
-      await this.model.updateOne(
-        { eventSlug },
-        { $set: { provider: 'cloudflare' } },
-      );
-      cfg.provider = 'cloudflare' as any;
-    } else if (urlSaysBunny && cfg.provider !== 'bunny') {
-      await this.model.updateOne(
-        { eventSlug },
-        { $set: { provider: 'bunny' } },
-      );
-      cfg.provider = 'bunny' as any;
-    }
-
-    // 3) Si el proveedor es Vimeo, Cloudflare o Bunny, no reprovisionamos (credenciales manuales)
-    if (
-      (cfg.provider as string) === 'vimeo' ||
-      (cfg.provider as string) === 'cloudflare' ||
-      (cfg.provider as string) === 'bunny'
-    ) {
+      this.configCache.delete(eventSlug);
       return cfg;
     }
 
-    // 4) Decide reprovision solo para Mux/Gcore:
-    const missingBasics =
-      !cfg.rtmpServerUrl || !cfg.rtmpStreamKey || !cfg.playbackHlsUrl;
-
-    const shouldReprovisionMux =
-      cfg.provider === 'gcore' ||
-      urlSaysGcore ||
-      (missingBasics && !urlSaysMux);
-
-    if (!shouldReprovisionMux) return cfg;
-
-    // 5) Reprovision con guardado atómico (minimiza duplicados)
-    const fresh = await this.model.findOne({ eventSlug });
-    const freshSaysMux = fresh ? this.isMuxUrl(fresh) : false;
-    if (
-      fresh &&
-      freshSaysMux &&
-      fresh.provider === 'mux' &&
-      fresh.rtmpStreamKey &&
-      fresh.playbackHlsUrl
-    ) {
-      return fresh;
+    // Normaliza provider según las URLs guardadas (credenciales de un
+    // proveedor distinto al seleccionado).
+    const detected =
+      LiveConfigService.providerFromUrl(cfg.playbackHlsUrl) ??
+      LiveConfigService.providerFromUrl(cfg.rtmpServerUrl);
+    if (detected && detected !== cfg.provider) {
+      await this.model.updateOne(
+        { eventSlug },
+        { $set: { provider: detected } },
+      );
+      cfg.provider = detected;
+      this.configCache.delete(eventSlug);
     }
-
-    this.log.log(`Reprovisioning Mux for eventSlug=${eventSlug}`);
-
-    const m = await this.mux.createLiveStream();
-
-    const updated = await this.model.findOneAndUpdate(
-      { eventSlug },
-      {
-        $set: {
-          provider: 'mux',
-          providerStreamId: m.providerStreamId,
-          providerPlaybackId: m.providerPlaybackId,
-          ingestProtocol: 'rtmp',
-          rtmpServerUrl: m.rtmpServerUrl,
-          rtmpStreamKey: m.rtmpStreamKey,
-          playbackHlsUrl: m.playbackHlsUrl,
-          lastError: '',
-        },
-      },
-      { new: true },
-    );
-
-    return updated ?? cfg;
+    return cfg;
   }
 
   async update(eventSlug: string, patch: Partial<LiveStreamConfig>) {
@@ -216,20 +116,32 @@ export class LiveConfigService {
     return updated;
   }
 
-  async get(eventSlug: string) {
-    // Servir desde caché si está vigente (evita N queries simultáneas al mismo doc)
+  /**
+   * Lectura para asistentes y speakers (sondeo cada pocos segundos): pasa por
+   * el caché, no crea nada y cachea también la ausencia de config, así no se
+   * consulta Mongo en cada sondeo de cada asistente.
+   */
+  async getCached(eventSlug: string): Promise<LiveStreamConfig | null> {
     const cached = this.configCache.get(eventSlug);
-    if (cached && Date.now() < cached.expiresAt) {
-      return cached.cfg;
-    }
+    if (cached && Date.now() < cached.expiresAt) return cached.cfg;
 
     const cfg = await this.model.findOne({ eventSlug }).lean();
-    if (!cfg) throw new NotFoundException('Live config no existe');
-
     this.configCache.set(eventSlug, {
       cfg,
       expiresAt: Date.now() + this.CONFIG_CACHE_TTL_MS,
     });
+    return cfg;
+  }
+
+  /** Lectura directa de Mongo (sin caché ni creación) que refresca el caché. */
+  async getFresh(eventSlug: string): Promise<LiveStreamConfig | null> {
+    this.configCache.delete(eventSlug);
+    return this.getCached(eventSlug);
+  }
+
+  async get(eventSlug: string) {
+    const cfg = await this.getCached(eventSlug);
+    if (!cfg) throw new NotFoundException('Live config no existe');
     return cfg;
   }
 

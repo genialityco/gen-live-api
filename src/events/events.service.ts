@@ -569,6 +569,22 @@ export class EventsService implements OnModuleInit {
       .lean();
   }
 
+  /**
+   * El slug del evento es único solo dentro de su organización, pero la
+   * config del estudio (LiveStreamConfig) se indexa por slug: basta con que
+   * el usuario sea dueñ@ de alguna organización con un evento de ese slug.
+   */
+  async isOwnerOfEventSlug(eventSlug: string, uid: string): Promise<boolean> {
+    if (!eventSlug || !uid) return false;
+    const evs = await this.model.find({ slug: eventSlug }, { orgId: 1 }).lean();
+    if (!evs.length) return false;
+    const owned = await this.orgModel.exists({
+      _id: { $in: evs.map((e) => e.orgId) },
+      ownerUid: uid,
+    });
+    return !!owned;
+  }
+
   async getOwnerUidByEventId(eventId: string) {
     const ev = await this.model.findById(eventId, { orgId: 1 }).lean();
     if (!ev) throw new NotFoundException('Event not found');
@@ -618,6 +634,8 @@ export class EventsService implements OnModuleInit {
       // Diferido: seguir contabilizando tiempo de visualización, pero on-demand
       // (se auto-desactiva sin audiencia). El tiempo en diferido = total - live.
       this.watcher.watchOnDemand(eventId);
+      // Cloudflare: también al pasar directo de vivo a diferido (sin `ended`).
+      if (ev.slug) void this.applyCloudflareReplayWhenReady(ev.slug);
     } else if (status === 'ended') {
       this.watcher.unwatch(eventId);
     }
@@ -676,13 +694,21 @@ export class EventsService implements OnModuleInit {
     if (updated) void this.mirrorEmergencyCache(updated);
   }
 
+  /** Slugs con una búsqueda de grabación de Cloudflare en curso. */
+  private readonly cloudflareReplayPending = new Set<string>();
+
   /**
-   * Cuando un evento con provider=cloudflare termina, Cloudflare Stream
-   * genera la grabación (VOD) del live input de forma asíncrona. Reintenta
-   * cada 15s (hasta ~6 min) y, apenas la grabación esté "ready", la deja
-   * como `event.stream`/`event.streams` (la URL que ven los asistentes al
-   * entrar en diferido) — análogo a `syncStreamFromStudio`, pero sin su
-   * guard de upcoming/live porque acá el evento ya está `ended` a propósito.
+   * Cuando un evento con provider=cloudflare termina (ended o replay),
+   * Cloudflare Stream genera la grabación (VOD) del live input de forma
+   * asíncrona. Reintenta cada 15s (hasta ~6 min) y, apenas la grabación esté
+   * "ready", la deja como `event.stream`/`event.streams` (la URL que ven los
+   * asistentes en diferido) — análogo a `syncStreamFromStudio`, pero sin su
+   * guard de upcoming/live porque acá el evento ya terminó a propósito.
+   *
+   * Solo reemplaza la URL de vivo: si la fuente de Cloudflare del evento ya
+   * es una grabación (p. ej. una elegida a mano en el Control del evento),
+   * no la pisa. Los reintentos viven en memoria: si la API se reinicia en
+   * esa ventana, la grabación se activa a mano desde el Control del evento.
    */
   private async applyCloudflareReplayWhenReady(
     eventSlug: string,
@@ -691,29 +717,32 @@ export class EventsService implements OnModuleInit {
     const MAX_ATTEMPTS = 24; // ~6 minutos con el delay de abajo
     const RETRY_DELAY_MS = 15_000;
 
+    if (attempt === 0) {
+      if (this.cloudflareReplayPending.has(eventSlug)) return;
+      this.cloudflareReplayPending.add(eventSlug);
+    }
+    let retrying = false;
+
     try {
       const cfg = await this.liveConfigService.get(eventSlug);
       if (cfg.provider !== 'cloudflare') return;
 
-      // `providerStreamId` no tiene hoy ningún campo en el estudio que lo
-      // llene correctamente para Cloudflare (a diferencia de Mux, que lo
-      // auto-provisiona) — puede traer basura de otro flujo/provider. Solo
-      // se confía en él si tiene pinta de UID real de Cloudflare (hex de 32);
-      // si no, se extrae de la playbackHlsUrl, que sí es la fuente confiable.
-      const isCloudflareUid = (v?: string | null) =>
-        !!v && /^[a-f0-9]{32}$/i.test(v);
-      const liveInputUid = isCloudflareUid(cfg.providerStreamId)
-        ? cfg.providerStreamId
-        : cfg.playbackHlsUrl?.match(
-            /cloudflarestream\.com\/([a-f0-9]{32})\//,
-          )?.[1];
-
+      const liveInputUid = CloudflareStreamService.liveInputUidFrom(cfg);
       if (!liveInputUid) {
         this.logger.warn(
           `[cloudflare-replay] No se pudo determinar el live input UID para ${eventSlug}`,
         );
         return;
       }
+
+      // ¿La fuente de Cloudflare del evento ya es una grabación?
+      const ev = await this.model
+        .findOne({ slug: eventSlug }, { stream: 1, streams: 1 })
+        .lean();
+      const cfUrl =
+        ev?.streams?.find((s) => s.provider === 'cloudflare')?.url ??
+        (ev?.stream?.provider === 'cloudflare' ? ev.stream.url : undefined);
+      if (cfUrl && !cfUrl.includes(liveInputUid)) return;
 
       const result =
         await this.cloudflareStreamService.getReplayUrl(liveInputUid);
@@ -733,6 +762,7 @@ export class EventsService implements OnModuleInit {
         return;
       }
 
+      retrying = true;
       setTimeout(() => {
         void this.applyCloudflareReplayWhenReady(eventSlug, attempt + 1);
       }, RETRY_DELAY_MS);
@@ -740,6 +770,8 @@ export class EventsService implements OnModuleInit {
       this.logger.warn(
         `[cloudflare-replay] Error buscando la grabación para ${eventSlug}: ${String(err)}`,
       );
+    } finally {
+      if (!retrying) this.cloudflareReplayPending.delete(eventSlug);
     }
   }
 

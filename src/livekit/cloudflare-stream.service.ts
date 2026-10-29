@@ -28,22 +28,33 @@ export class CloudflareStreamService {
   }
 
   /**
-   * URL del embed de Cloudflare Stream (`.../{uid}/iframe`), el reproductor
-   * propio de Cloudflare (maneja HLS/buffering del lado de ellos). Se
-   * prefiere sobre la URL del manifest (.../manifest/video.m3u8) para
-   * repeticiones: evita que el visor tenga que lidiar con hls.js directo
-   * contra un VOD de Cloudflare.
+   * UID del live input. `providerStreamId` no lo llena ningún campo del
+   * estudio de forma fiable para Cloudflare (puede traer basura de otro
+   * proveedor): solo se usa si parece un UID real (hex de 32); si no, se
+   * extrae de la URL de reproducción (.../{uid}/manifest/video.m3u8).
    */
-  private iframeUrlFor(video: any): string | null {
+  static liveInputUidFrom(cfg: {
+    providerStreamId?: string | null;
+    playbackHlsUrl?: string | null;
+  }): string | null {
+    if (cfg.providerStreamId && /^[a-f0-9]{32}$/i.test(cfg.providerStreamId))
+      return cfg.providerStreamId;
+    return (
+      cfg.playbackHlsUrl?.match(
+        /(?:cloudflarestream\.com|videodelivery\.net)\/([a-f0-9]{32})\//i,
+      )?.[1] ?? null
+    );
+  }
+
+  /**
+   * Para repeticiones se usa el manifest HLS de la grabación (antes el embed
+   * `/iframe`): así la reproduce VodHlsPlayer, que mide la reproducción y, si
+   * falla, pasa a la siguiente fuente. Un iframe de otro dominio no avisa
+   * cuando no carga, así que con él no había ni métricas ni respaldo.
+   */
+  private replayUrlFor(video: any): string | null {
     const hls = video?.playback?.hls as string | undefined;
-    const uid = video?.uid as string | undefined;
-    if (!hls || !uid) return null;
-    try {
-      const u = new URL(hls);
-      return `${u.protocol}//${u.host}/${uid}/iframe`;
-    } catch {
-      return null;
-    }
+    return hls || null;
   }
 
   private mapVideo(video: any) {
@@ -56,7 +67,7 @@ export class CloudflareStreamService {
           : null,
       createdAt: video.created ?? null,
       playbackId: video.uid ?? null,
-      replayUrl: this.iframeUrlFor(video),
+      replayUrl: this.replayUrlFor(video),
     };
   }
 

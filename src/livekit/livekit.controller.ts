@@ -23,11 +23,13 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { IsIn, IsOptional, IsString } from 'class-validator';
 import { LivekitService } from './livekit.service';
-import { LiveConfigService } from './live-config.service';
+import { LiveConfigService, StreamProviderId } from './live-config.service';
 import { MuxService } from './mux.service';
 import { CloudflareStreamService } from './cloudflare-stream.service';
 import { EventsService } from '../events/events.service';
 import { FirebaseAuthGuard } from 'src/common/guards/firebase-auth.guard';
+import { EventSlugOwnerGuard } from 'src/common/guards/event-slug-owner.guard';
+import { LiveStreamConfig } from './schemas/live-stream-config.schema';
 import * as admin from 'firebase-admin';
 
 export class EnsureRoomDto {
@@ -102,10 +104,11 @@ export class LivekitController {
   /**
    * POST /livekit/provision
    * Provisiona o re-provisiona un live event con Mux via API.
-   * Para Vimeo y Cloudflare Stream, las credenciales se ingresan
+   * Para Vimeo, Cloudflare y Bunny las credenciales se ingresan
    * manualmente en PUT /livekit/config.
    */
   @Post('provision')
+  @UseGuards(FirebaseAuthGuard, EventSlugOwnerGuard)
   async provision(
     @Body()
     body: {
@@ -159,6 +162,7 @@ export class LivekitController {
   }
 
   @Put('config')
+  @UseGuards(FirebaseAuthGuard, EventSlugOwnerGuard)
   async setConfig(
     @Body()
     body: {
@@ -199,6 +203,25 @@ export class LivekitController {
     if (typeof body.showFrame === 'boolean') patch.showFrame = body.showFrame;
     if (typeof body.frameUrl === 'string') patch.frameUrl = body.frameUrl;
 
+    // El proveedor lo elige el productor en el estudio; si no viene, se
+    // deduce de la URL de reproducción (y si tampoco se reconoce, se deja el
+    // que ya tenía la config).
+    const provider: StreamProviderId | null =
+      body.provider ??
+      (typeof patch.playbackHlsUrl === 'string'
+        ? LiveConfigService.providerFromUrl(patch.playbackHlsUrl)
+        : null);
+    if (provider) patch.provider = provider;
+
+    // Cloudflare: el UID del live input (para buscar grabaciones) sale de la
+    // URL de reproducción; no hay campo para pegarlo aparte.
+    if (provider === 'cloudflare' && typeof patch.playbackHlsUrl === 'string') {
+      const uid = CloudflareStreamService.liveInputUidFrom({
+        playbackHlsUrl: patch.playbackHlsUrl,
+      });
+      if (uid) patch.providerStreamId = uid;
+    }
+
     const saved = await this.liveConfig.update(body.eventSlug, patch);
 
     // Sync estudio→evento: reflejar el playbackHlsUrl en event.stream para que el
@@ -209,21 +232,10 @@ export class LivekitController {
       typeof patch.playbackHlsUrl === 'string' &&
       patch.playbackHlsUrl
     ) {
-      const url: string = patch.playbackHlsUrl;
-      const provider: 'vimeo' | 'mux' | 'gcore' | 'cloudflare' | 'bunny' =
-        /vimeo\.com/i.test(url)
-          ? 'vimeo'
-          : /gvideo\.(co|io)/i.test(url)
-            ? 'gcore'
-            : /cloudflarestream\.com/i.test(url)
-              ? 'cloudflare'
-              : /mediadelivery\.net|b-cdn\.net/i.test(url)
-                ? 'bunny'
-                : 'mux';
       try {
         await this.eventsService.syncStreamFromStudio(body.eventSlug, {
-          url,
-          provider,
+          url: patch.playbackHlsUrl,
+          provider: saved.provider,
         });
       } catch {
         // No bloquear el guardado de config si el sync al evento falla
@@ -233,33 +245,57 @@ export class LivekitController {
     return { ok: true, id: saved._id, allowSecrets };
   }
 
+  /**
+   * GET /livekit/config — config completa del estudio, con credenciales de
+   * ingesta (stream key / SRT) en claro para que el productor las verifique
+   * o las copie a OBS. Solo para el dueñ@ del evento.
+   */
   @Get('config')
+  @UseGuards(FirebaseAuthGuard, EventSlugOwnerGuard)
   async getConfig(@Query('eventSlug') eventSlug: string) {
     if (!eventSlug) throw new BadRequestException('eventSlug requerido');
     const cfg = await this.liveConfig.getOrCreate(eventSlug);
 
-    if (!cfg) {
-      throw new BadRequestException(
-        'No se encontró configuración para el evento',
-      );
-    }
-
-    // Nota: rtmpStreamKey/srtIngestUrl van sin enmascarar. Esta ruta no tiene
-    // FirebaseAuthGuard, así que cualquiera con el eventSlug puede leerlos.
     return {
       eventSlug: cfg.eventSlug,
-      provider: cfg.provider || 'mux',
+      provider: cfg.provider,
       providerStreamId: cfg.providerStreamId || '',
       ingestProtocol: cfg.ingestProtocol,
       rtmpServerUrl: cfg.rtmpServerUrl,
       rtmpStreamKey: cfg.rtmpStreamKey || '',
       srtIngestUrl: cfg.srtIngestUrl || '',
       playbackHlsUrl: cfg.playbackHlsUrl,
-      layout: cfg.layout,
       maxParticipants: cfg.maxParticipants,
       status: cfg.status,
       activeEgressId: cfg.activeEgressId,
       lastError: cfg.lastError,
+      ...this.publicFields(cfg),
+    };
+  }
+
+  /**
+   * GET /livekit/public-config — lo que necesitan asistentes y speakers
+   * (marco, capa de medios, botón de unirse), sin credenciales. Sin auth y
+   * con caché de 30 s: la página del asistente la sondea cada pocos
+   * segundos. `fresh=1` salta el caché (estudio, pocos usuarios). No crea
+   * la config si no existe: devuelve los valores por defecto.
+   */
+  @Get('public-config')
+  async getPublicConfig(
+    @Query('eventSlug') eventSlug: string,
+    @Query('fresh') fresh?: string,
+  ) {
+    if (!eventSlug) throw new BadRequestException('eventSlug requerido');
+    const cfg =
+      fresh === '1'
+        ? await this.liveConfig.getFresh(eventSlug)
+        : await this.liveConfig.getCached(eventSlug);
+    return { eventSlug, ...this.publicFields(cfg ?? {}) };
+  }
+
+  private publicFields(cfg: Partial<LiveStreamConfig>) {
+    return {
+      layout: cfg.layout ?? 'speaker',
       showFrame: !!cfg.showFrame,
       frameUrl: cfg.frameUrl || '',
       // Configs anteriores al campo no lo tienen: habilitado
@@ -697,19 +733,28 @@ export class LivekitController {
     return null;
   }
 
+  /** ID del stream en el proveedor (live stream de Mux / live input de Cloudflare). */
+  private providerStreamIdFor(cfg: LiveStreamConfig): string | null {
+    if (cfg.provider === 'cloudflare')
+      return CloudflareStreamService.liveInputUidFrom(cfg);
+    return cfg.providerStreamId || null;
+  }
+
   /**
    * GET /livekit/replay?eventSlug=xxx
    * Obtiene la URL de repetición del live stream (Mux o Cloudflare Stream).
    * Ambos generan automáticamente una grabación cuando termina el stream.
    */
   @Get('replay')
+  @UseGuards(FirebaseAuthGuard, EventSlugOwnerGuard)
   async getReplayUrl(@Query('eventSlug') eventSlug: string) {
     if (!eventSlug) throw new BadRequestException('eventSlug requerido');
 
     const cfg = await this.liveConfig.get(eventSlug);
     const provider = this.replayProviderFor(cfg.provider);
+    const streamId = this.providerStreamIdFor(cfg);
 
-    if (!cfg.providerStreamId || !provider) {
+    if (!streamId || !provider) {
       return {
         ok: false,
         status: 'not_available',
@@ -718,7 +763,7 @@ export class LivekitController {
       };
     }
 
-    const result = await provider.getReplayUrl(cfg.providerStreamId);
+    const result = await provider.getReplayUrl(streamId);
     return {
       ok: result.status === 'ready',
       provider: cfg.provider,
@@ -731,13 +776,15 @@ export class LivekitController {
    * Obtiene información del live stream (Mux o Cloudflare Stream).
    */
   @Get('stream-info')
+  @UseGuards(FirebaseAuthGuard, EventSlugOwnerGuard)
   async getStreamInfo(@Query('eventSlug') eventSlug: string) {
     if (!eventSlug) throw new BadRequestException('eventSlug requerido');
 
     const cfg = await this.liveConfig.get(eventSlug);
     const provider = this.replayProviderFor(cfg.provider);
+    const streamId = this.providerStreamIdFor(cfg);
 
-    if (!provider || !cfg.providerStreamId) {
+    if (!provider || !streamId) {
       return {
         ok: false,
         message:
@@ -745,7 +792,7 @@ export class LivekitController {
       };
     }
 
-    const info = await provider.getLiveStreamInfo(cfg.providerStreamId);
+    const info = await provider.getLiveStreamInfo(streamId);
 
     if (!info) {
       return {
@@ -765,22 +812,26 @@ export class LivekitController {
    * Lista todas las grabaciones disponibles para un evento (Mux o Cloudflare Stream).
    */
   @Get('assets')
+  @UseGuards(FirebaseAuthGuard, EventSlugOwnerGuard)
   async listAssets(@Query('eventSlug') eventSlug: string) {
     if (!eventSlug) throw new BadRequestException('eventSlug requerido');
 
-    const cfg = await this.liveConfig.get(eventSlug);
-    const provider = this.replayProviderFor(cfg.provider);
+    // Sin config todavía (nunca se configuró el estudio): no hay grabaciones.
+    const cfg = await this.liveConfig.getCached(eventSlug);
+    const provider = cfg ? this.replayProviderFor(cfg.provider) : null;
+    const streamId = cfg ? this.providerStreamIdFor(cfg) : null;
 
-    if (!cfg.providerStreamId || !provider) {
+    if (!cfg || !streamId || !provider) {
       return {
         ok: false,
+        provider: cfg?.provider ?? null,
         assets: [],
         message:
           'Este evento no tiene un stream de Mux o Cloudflare Stream provisionado.',
       };
     }
 
-    const result = await provider.listAssets(cfg.providerStreamId);
+    const result = await provider.listAssets(streamId);
     return { ok: true, provider: cfg.provider, ...result };
   }
 
@@ -789,6 +840,7 @@ export class LivekitController {
    * Obtiene la URL de repetición de un asset específico
    */
   @Get('replay-by-asset')
+  @UseGuards(FirebaseAuthGuard, EventSlugOwnerGuard)
   async getReplayByAsset(
     @Query('eventSlug') eventSlug: string,
     @Query('assetId') assetId: string,
@@ -811,6 +863,7 @@ export class LivekitController {
 
     return {
       ok: result.status === 'ready',
+      provider: cfg.provider,
       ...result,
     };
   }
