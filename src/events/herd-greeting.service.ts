@@ -364,7 +364,11 @@ export class HerdGreetingService {
         recipients,
         // De quienes vieron el botón, cuántos saludaron al menos una vez
         ctrPct: shownWithButton.size
-          ? round1((senders.size / shownWithButton.size) * 100)
+          ? round1(
+              ([...senders].filter((u) => shownWithButton.has(u)).length /
+                shownWithButton.size) *
+                100,
+            )
           : null,
       },
       replies: {
@@ -385,7 +389,11 @@ export class HerdGreetingService {
           recipients: r.recipients,
           replies: r.replies,
           ctrPct: r.shown.size
-            ? round1((r.senders.size / r.shown.size) * 100)
+            ? round1(
+                ([...r.senders].filter((u) => r.shown.has(u)).length /
+                  r.shown.size) *
+                  100,
+              )
             : null,
         }))
         .sort((a, b) => b.greets - a.greets || b.shown - a.shown),
