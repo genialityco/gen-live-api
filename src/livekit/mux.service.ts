@@ -186,7 +186,11 @@ export class MuxService {
               id: asset.id,
               status: asset.status,
               duration: asset.duration || null, // duración en segundos
-              createdAt: asset.created_at || null,
+              // Mux da created_at en segundos Unix como texto ("1793280855");
+              // se pasa a ISO como Cloudflare, para ordenar y mostrar la fecha.
+              createdAt: asset.created_at
+                ? new Date(Number(asset.created_at) * 1000).toISOString()
+                : null,
               playbackId,
               replayUrl: playbackId
                 ? `https://stream.mux.com/${playbackId}.m3u8`
