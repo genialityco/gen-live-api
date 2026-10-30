@@ -292,6 +292,10 @@ export class HerdService {
           publicMessage,
           greeting,
           groups,
+          // Claves excluidas, incluidas las que no son opción del formulario
+          // ("-", "No Aplica" de registros importados): sin ellas el asistente
+          // no sabe que está silenciado hasta que el backend publica su grupo
+          excludedKeys: [...ctx.excludedKeys],
           holdoutPercent: ctx.holdoutPercent,
           updatedAt: Date.now(),
         }),
