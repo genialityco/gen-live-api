@@ -17,9 +17,15 @@ const lean = (v: unknown) => ({ lean: () => Promise.resolve(v) });
 function setup(herdConfig: any) {
   const writes: Array<{ path: string; value: any }> = [];
   const attendees: Record<string, any> = {
-    a1: { _id: 'a1', registrationData: { esp: 'endocrinologia' } },
+    a1: {
+      _id: 'a1',
+      registrationData: { esp: 'endocrinologia', ciudad: 'bogota' },
+    },
     a2: { _id: 'a2', registrationData: { esp: 'Endocrinología' } }, // etiqueta, no valor
-    a3: { _id: 'a3', registrationData: { esp: 'pediatria' } },
+    a3: {
+      _id: 'a3',
+      registrationData: { esp: 'pediatria', ciudad: 'Bogotá' },
+    },
     a4: { _id: 'a4', registrationData: { esp: 'endocrinologia' } },
     a5: { _id: 'a5', registrationData: {} },
   };
@@ -39,6 +45,14 @@ function setup(herdConfig: any) {
               options: [
                 { value: 'endocrinologia', label: 'Endocrinología' },
                 { value: 'pediatria', label: 'Pediatría' },
+              ],
+            },
+            {
+              id: 'ciudad',
+              type: 'select',
+              options: [
+                { value: 'bogota', label: 'Bogotá' },
+                { value: 'cali', label: 'Cali' },
               ],
             },
           ],
@@ -67,15 +81,24 @@ function setup(herdConfig: any) {
       remove: () => Promise.resolve(),
     }),
   };
-  // Simula la agregación: inscritos agrupados por el valor crudo del campo
+  // Simula la agregación: inscritos agrupados por la combinación de valores
+  // crudos de los campos proyectados (uno por manada)
   const eventUserModel = {
-    aggregate: jest.fn(() => {
-      const byRaw = new Map<unknown, number>();
+    aggregate: jest.fn((pipeline: any[]) => {
+      const fieldIds = Object.keys(pipeline[1].$lookup.pipeline[1].$project.v);
+      const byRaw = new Map<string, { _id: any; n: number }>();
       for (const a of Object.values(attendees)) {
-        const raw = a.registrationData.esp;
-        byRaw.set(raw, (byRaw.get(raw) ?? 0) + 1);
+        const _id = Object.fromEntries(
+          fieldIds
+            .filter((f) => a.registrationData[f] !== undefined)
+            .map((f) => [f, a.registrationData[f]]),
+        );
+        const k = JSON.stringify(_id);
+        const row = byRaw.get(k) ?? { _id, n: 0 };
+        row.n++;
+        byRaw.set(k, row);
       }
-      return Promise.resolve([...byRaw].map(([_id, n]) => ({ _id, n })));
+      return Promise.resolve([...byRaw.values()]);
     }),
   };
   const svc = new HerdService(
@@ -467,6 +490,112 @@ describe('HerdService', () => {
     expect(r.control).toMatchObject({ attendees: 1, avgPlaybackMin: 10 });
   });
 
+  describe('varias manadas', () => {
+    const multiConfig = {
+      ...baseConfig,
+      extraHerds: [
+        {
+          fieldId: 'ciudad',
+          labelPattern: 'colegas de {valor}',
+        },
+      ],
+    };
+
+    it('cuenta cada manada por separado, con prefijo en las adicionales', async () => {
+      const { svc, writes } = setup(multiConfig);
+      await svc.onActiveAttendees('ev1', m(['a1', 'a2', 'a3']));
+
+      const live = writes.find((w) => w.path === '/herd/ev1/live');
+      expect(live?.value.counts).toEqual({
+        endocrinologia: 2,
+        pediatria: 1,
+        // a1 por valor y a3 por etiqueta caen en la misma opción
+        'ciudad~bogota': 2,
+      });
+      expect(live?.value.total).toBe(3);
+
+      const members = writes.find((w) => w.path === '/herd/ev1/members');
+      expect(members?.value.ua1).toMatchObject({
+        key: 'endocrinologia',
+        position: 1,
+        others: [
+          {
+            key: 'ciudad~bogota',
+            label: 'colegas de Bogotá',
+            singular: 'colega de Bogotá',
+            position: 1,
+          },
+        ],
+      });
+      // Sin ciudad: solo la manada principal
+      expect(members?.value.ua2.others).toBeUndefined();
+    });
+
+    it('excluir un grupo no silencia a quien tiene otra manada con mensajes', async () => {
+      const { svc, writes } = setup({
+        ...multiConfig,
+        excludedGroups: ['pediatria'],
+      });
+      await svc.onActiveAttendees('ev1', m(['a3', 'a4']));
+
+      const members = writes.find((w) => w.path === '/herd/ev1/members');
+      // a3: pediatría excluida, pero Bogotá sí → su grupo principal es Bogotá
+      expect(members?.value.ua3).toMatchObject({ key: 'ciudad~bogota' });
+      expect(members?.value.ua3.muted).toBeUndefined();
+      expect(members?.value.ua3.others).toBeUndefined();
+    });
+
+    it('silencia a quien tiene todos sus grupos excluidos', async () => {
+      const { svc, writes } = setup({
+        ...multiConfig,
+        excludedGroups: ['pediatria'],
+        extraHerds: [{ fieldId: 'ciudad', excludedGroups: ['bogota'] }],
+      });
+      await svc.onActiveAttendees('ev1', m(['a3']));
+
+      const members = writes.find((w) => w.path === '/herd/ev1/members');
+      expect(members?.value.ua3).toMatchObject({ muted: true });
+    });
+
+    it('cuenta los inscritos de cada manada', async () => {
+      const { svc, writes } = setup(multiConfig);
+      await svc.onActiveAttendees('ev1', m(['a1']));
+
+      const live = writes.find((w) => w.path === '/herd/ev1/live');
+      expect(live?.value).toMatchObject({
+        registered: {
+          endocrinologia: 3,
+          pediatria: 1,
+          'ciudad~bogota': 2,
+        },
+        registeredTotal: 5,
+      });
+    });
+
+    it('espeja las manadas y sus opciones en la config', async () => {
+      const { svc, writes } = setup(multiConfig);
+      await svc.mirrorConfig('ev1');
+
+      const config = writes.find((w) => w.path === '/herd/ev1/config');
+      expect(config?.value.herds).toEqual([
+        { fieldId: 'esp', prefix: '' },
+        {
+          fieldId: 'ciudad',
+          prefix: 'ciudad~',
+          labelPattern: 'colegas de {valor}',
+        },
+      ]);
+      expect(config?.value.groups).toContainEqual({
+        key: 'ciudad~cali',
+        fieldId: 'ciudad',
+        value: 'cali',
+        optionLabel: 'Cali',
+        label: 'colegas de Cali',
+        singular: 'colega de Cali',
+      });
+    });
+  });
+
   it('herdKey produce claves válidas para RTDB', () => {
     expect(herdKey(' Médico.Gen#eral [x] ')).toBe('medico_gen_eral _x_');
   });
@@ -474,10 +603,17 @@ describe('HerdService', () => {
   it('el botón de saludo se sortea de forma determinista y en la proporción configurada', () => {
     expect(greetingHasButton('ev1', 'a1', 0)).toBe(true);
     const ids = Array.from({ length: 2000 }, (_, i) => `att${i}`);
-    const withButton = ids.filter((id) => greetingHasButton('ev1', id, 30)).length;
+    const withButton = ids.filter((id) =>
+      greetingHasButton('ev1', id, 30),
+    ).length;
     expect(withButton / ids.length).toBeGreaterThan(0.65);
     expect(withButton / ids.length).toBeLessThan(0.75);
     // Mismo asistente, mismo resultado
-    expect(ids.every((id) => greetingHasButton('ev1', id, 30) === greetingHasButton('ev1', id, 30))).toBe(true);
+    expect(
+      ids.every(
+        (id) =>
+          greetingHasButton('ev1', id, 30) === greetingHasButton('ev1', id, 30),
+      ),
+    ).toBe(true);
   });
 });

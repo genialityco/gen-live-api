@@ -20,6 +20,13 @@ export class HerdGreetingActionDto {
   @MaxLength(40)
   greetingId?: string;
 
+  // Grupo del anuncio (con varias manadas, cada anuncio es de una); sin él,
+  // el grupo principal del asistente
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  groupKey?: string;
+
   // Nombre que muestra la página (respaldo si no se encuentra su registro)
   @IsOptional()
   @IsString()

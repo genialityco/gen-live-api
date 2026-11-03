@@ -25,13 +25,19 @@ import {
 import { HerdGreetingActionDto } from './dtos/herd-greeting-action.dto';
 
 /** Lo que el backend publicó del asistente en /herd/{eventId}/members/{uid} */
-type MemberEntry = {
-  key: string;
-  label: string;
-  singular?: string;
+type MemberGroup = { key: string; label: string; singular?: string };
+type MemberEntry = MemberGroup & {
   muted?: boolean;
   greet?: boolean;
+  // Grupos de las demás manadas
+  others?: MemberGroup[];
 };
+
+/** Grupos con mensajes del asistente: el principal y los de las demás manadas */
+const memberGroups = (m: MemberEntry): MemberGroup[] => [
+  m,
+  ...(m.others ?? []),
+];
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
 const mean = (xs: number[]) =>
@@ -134,23 +140,32 @@ export class HerdGreetingService {
       throw new ForbiddenException('No perteneces a un grupo con anuncios');
     }
 
+    if (dto.action === 'reply') return this.reply(eventId, uid, member, dto);
+
+    // Grupo del anuncio que lo originó (uno de los suyos); sin indicar, el principal
+    const group = dto.groupKey
+      ? memberGroups(member).find((g) => g.key === dto.groupKey)
+      : member;
+    if (!group) {
+      throw new ForbiddenException('No perteneces a ese grupo');
+    }
     if (dto.action === 'impression')
-      return this.impression(eventId, uid, member, dto);
-    if (dto.action === 'greet')
-      return this.greet(
-        eventId,
-        uid,
-        member,
-        dto,
-        cfg.greeting.cooldownSec ?? 60,
-      );
-    return this.reply(eventId, uid, member, dto);
+      return this.impression(eventId, uid, member, group, dto);
+    return this.greet(
+      eventId,
+      uid,
+      member,
+      group,
+      dto,
+      cfg.greeting.cooldownSec ?? 60,
+    );
   }
 
   private async impression(
     eventId: string,
     uid: string,
     member: MemberEntry,
+    group: MemberGroup,
     dto: HerdGreetingActionDto,
   ) {
     const { attendeeId } = await this.who(eventId, uid, dto.name);
@@ -159,8 +174,8 @@ export class HerdGreetingService {
       kind: 'impression',
       uid,
       attendeeId,
-      groupKey: member.key,
-      groupLabel: member.label,
+      groupKey: group.key,
+      groupLabel: group.label,
       source: dto.source,
       hasButton: !!member.greet,
     });
@@ -171,6 +186,7 @@ export class HerdGreetingService {
     eventId: string,
     uid: string,
     member: MemberEntry,
+    group: MemberGroup,
     dto: HerdGreetingActionDto,
     cooldownSec: number,
   ) {
@@ -179,8 +195,12 @@ export class HerdGreetingService {
         'Este asistente no tiene el botón de saludo',
       );
     }
+    // La espera es por grupo: puede saludar seguido a cada una de sus manadas
     const last = await this.greetingModel
-      .findOne({ eventId, kind: 'greet', uid }, { createdAt: 1 })
+      .findOne(
+        { eventId, kind: 'greet', uid, groupKey: group.key },
+        { createdAt: 1 },
+      )
       .sort({ createdAt: -1 })
       .lean();
     const waitMs = last?.createdAt
@@ -195,13 +215,11 @@ export class HerdGreetingService {
 
     const { attendeeId, name } = await this.who(eventId, uid, dto.name);
     const live = await this.rtdb
-      .ref(`/herd/${eventId}/live/counts/${member.key}`)
+      .ref(`/herd/${eventId}/live/counts/${group.key}`)
       .once('value');
     const recipients = Math.max(0, Number(live.val() ?? 0) - 1);
 
-    const ref = this.rtdb
-      .ref(`/herd/${eventId}/greetings/${member.key}`)
-      .push();
+    const ref = this.rtdb.ref(`/herd/${eventId}/greetings/${group.key}`).push();
     await ref.set({
       fromUid: uid,
       name,
@@ -212,8 +230,8 @@ export class HerdGreetingService {
       kind: 'greet',
       uid,
       attendeeId,
-      groupKey: member.key,
-      groupLabel: member.label,
+      groupKey: group.key,
+      groupLabel: group.label,
       source: dto.source,
       recipients,
       greetingId: ref.key,
@@ -231,7 +249,9 @@ export class HerdGreetingService {
     // Quien quedó sin botón (experimento) tampoco puede devolver: así su
     // brazo no tiene ninguna interacción del saludo
     if (!member.greet) {
-      throw new ForbiddenException('Este asistente no tiene el botón de saludo');
+      throw new ForbiddenException(
+        'Este asistente no tiene el botón de saludo',
+      );
     }
     const original = await this.greetingModel
       .findOne({ eventId, kind: 'greet', greetingId: dto.greetingId })
@@ -239,7 +259,8 @@ export class HerdGreetingService {
     if (!original) throw new NotFoundException('Saludo no encontrado');
     if (original.uid === uid)
       throw new BadRequestException('Es tu propio saludo');
-    if (original.groupKey !== member.key) {
+    const group = memberGroups(member).find((g) => g.key === original.groupKey);
+    if (!group) {
       throw new ForbiddenException('El saludo es de otro grupo');
     }
 
@@ -250,8 +271,8 @@ export class HerdGreetingService {
         kind: 'reply',
         uid,
         attendeeId,
-        groupKey: member.key,
-        groupLabel: member.label,
+        groupKey: group.key,
+        groupLabel: group.label,
         greetingId: dto.greetingId,
         toUid: original.uid,
       });
@@ -419,20 +440,8 @@ export class HerdGreetingService {
       .map(([id]) => id);
     if (!attendeeIds.length) return null;
 
-    // Grupo actual (para dejar fuera los excluidos)
-    const groupOf = new Map<string, string | null>();
-    if (ctx.fieldId) {
-      const path = `registrationData.${ctx.fieldId}`;
-      const docs = await this.orgAttendeeModel
-        .find({ _id: { $in: attendeeIds } }, { [path]: 1 })
-        .lean();
-      for (const d of docs as any[]) {
-        groupOf.set(
-          String(d._id),
-          ctx.resolve(d.registrationData?.[ctx.fieldId])?.key ?? null,
-        );
-      }
-    }
+    // Grupos actuales (para dejar fuera a quien los tiene todos excluidos)
+    const groupsOf = await ctx.groupsFor(attendeeIds);
 
     const eventUsers = await this.eventUserModel
       .find({ eventId }, { _id: 1, attendeeId: 1 })
@@ -460,8 +469,8 @@ export class HerdGreetingService {
     const withButton: number[] = [];
     const withoutButton: number[] = [];
     for (const aid of attendeeIds) {
-      const key = groupOf.get(aid);
-      if (!key || ctx.excludedKeys.has(key)) continue;
+      const groups = groupsOf.get(aid) ?? [];
+      if (groups.every((g) => ctx.excludedKeys.has(g.key))) continue;
       const v = viewing.get(aid);
       if (!v?.wasLive) continue;
       (greetingHasButton(eventId, aid, holdoutPercent)

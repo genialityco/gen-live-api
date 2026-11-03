@@ -1,4 +1,9 @@
-import { herdGroupForms, pluralizeEs, singularizeEs } from './herd-grammar';
+import {
+  herdGroupForms,
+  herdGroupName,
+  pluralizeEs,
+  singularizeEs,
+} from './herd-grammar';
 
 describe('herd-grammar', () => {
   it.each([
@@ -42,6 +47,23 @@ describe('herd-grammar', () => {
     expect(herdGroupForms(undefined, 'Pediatría')).toEqual({
       plural: 'Pediatría',
       singular: 'Pediatría',
+    });
+  });
+
+  it('nombra con el patrón de la manada cuando la opción no tiene nombre propio', () => {
+    const pattern = { labelPattern: 'colegas de {valor}' };
+    expect(herdGroupName(undefined, pattern, 'Bogotá')).toEqual({
+      plural: 'colegas de Bogotá',
+      singular: 'colega de Bogotá',
+    });
+    // El nombre escrito para la opción manda sobre el patrón
+    expect(herdGroupName({ label: 'rolos' }, pattern, 'Bogotá').plural).toBe(
+      'rolos',
+    );
+    // Sin patrón: la etiqueta tal cual
+    expect(herdGroupName(undefined, undefined, 'Cali')).toEqual({
+      plural: 'Cali',
+      singular: 'Cali',
     });
   });
 });

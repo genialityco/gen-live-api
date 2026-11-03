@@ -102,3 +102,33 @@ export function herdGroupForms(
     singular: singular || (plural ? singularizeEs(plural) : fallback),
   };
 }
+
+/** Nombre de los grupos de una manada sin nombre propio ("colegas de {valor}") */
+export type HerdNamePattern = {
+  labelPattern?: string;
+  singularPattern?: string;
+};
+
+/**
+ * Nombre de un grupo: lo escrito para la opción manda; si no, el patrón de la
+ * manada con {valor} = etiqueta de la opción (o el texto libre); si no, la
+ * etiqueta tal cual.
+ */
+export function herdGroupName(
+  custom: { label?: string; singular?: string } | undefined,
+  pattern: HerdNamePattern | undefined,
+  value: string,
+): { plural: string; singular: string } {
+  if (custom?.label?.trim() || custom?.singular?.trim()) {
+    return herdGroupForms(custom, value);
+  }
+  if (!pattern?.labelPattern?.trim() && !pattern?.singularPattern?.trim()) {
+    return { plural: value, singular: value };
+  }
+  const forms = herdGroupForms(
+    { label: pattern.labelPattern, singular: pattern.singularPattern },
+    value,
+  );
+  const put = (s: string) => s.replace(/\{valor\}/gi, value);
+  return { plural: put(forms.plural), singular: put(forms.singular) };
+}

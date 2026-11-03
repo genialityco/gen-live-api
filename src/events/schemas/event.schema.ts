@@ -87,6 +87,15 @@ export interface HerdMessageConfig {
  * endocrinólogos conectados"). El mensaje privado lo ve solo quien llega; el
  * público, todos.
  */
+/** Manada adicional: otro campo del formulario, con sus nombres y exclusiones */
+export interface HerdExtraConfig {
+  fieldId: string;
+  groupLabels?: Array<{ value: string; label?: string; singular?: string }>;
+  excludedGroups?: string[];
+  labelPattern?: string;
+  singularPattern?: string;
+}
+
 export interface EventHerdConfig {
   enabled: boolean;
   fieldId?: string; // campo del formulario de la org que define la manada
@@ -97,6 +106,13 @@ export interface EventHerdConfig {
   // Opciones del campo (valor) cuyos asistentes no ven ningún mensaje y que
   // nunca se anuncian en el grupal
   excludedGroups?: string[];
+  // Nombre de los grupos sin nombre propio, con {valor} = opción del
+  // formulario: "colegas de {valor}" (plural) y/o "colega de {valor}"
+  labelPattern?: string;
+  singularPattern?: string;
+  // Manadas adicionales: el asistente pertenece a un grupo por cada campo
+  // (la de arriba es la principal) y los mensajes rotan entre todas
+  extraHerds?: HerdExtraConfig[];
   // % de asistentes que, al azar, quedan como grupo de control: no ven ningún
   // mensaje. La asignación se persiste en /herd/{eventId}/arms para comparar
   // la retención contra quienes sí los ven (0 = sin experimento)

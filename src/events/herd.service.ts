@@ -11,14 +11,19 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import * as admin from 'firebase-admin';
-import { Event, EventDocument, EventHerdConfig } from './schemas/event.schema';
+import {
+  Event,
+  EventDocument,
+  EventHerdConfig,
+  HerdExtraConfig,
+} from './schemas/event.schema';
 import { Organization } from '../organizations/schemas/organization.schema';
 import { OrgAttendee } from '../organizations/schemas/org-attendee.schema';
 import { EventUser } from './schemas/event-user.schema';
 import { ViewingSession } from './schemas/viewing-session.schema';
 import { RtdbService } from '../rtdb/rtdb.service';
 import { UpdateHerdConfigDto } from './dtos/update-herd-config.dto';
-import { herdGroupForms } from './herd-grammar';
+import { herdGroupName } from './herd-grammar';
 
 /**
  * Normaliza un valor del formulario para comparar sin tildes/mayúsculas.
@@ -42,7 +47,13 @@ export const herdKey = (s: unknown) =>
 export const DEFAULT_HERD_CONFIG: Required<
   Omit<
     EventHerdConfig,
-    'fieldId' | 'groupLabels' | 'excludedGroups' | 'holdoutPercent'
+    | 'fieldId'
+    | 'groupLabels'
+    | 'excludedGroups'
+    | 'holdoutPercent'
+    | 'labelPattern'
+    | 'singularPattern'
+    | 'extraHerds'
   >
 > = {
   enabled: false,
@@ -104,10 +115,59 @@ const MIN_REPEAT_SEC = 30;
 type Group = { key: string; label: string; singular: string };
 
 /**
- * Grupo propio publicado en /herd/{eventId}/members/{uid}. muted = no ve
- * ningún mensaje (grupo excluido o grupo de control del experimento)
+ * Grupo propio publicado en /herd/{eventId}/members/{uid}: el de la primera
+ * manada con mensajes arriba (lo que leen los clientes anteriores) y los de
+ * las demás manadas en `others`. muted = no ve ningún mensaje (todos sus
+ * grupos excluidos o grupo de control del experimento)
  */
-type MemberEntry = Group & { position?: number; muted?: true; greet?: true };
+type MemberEntry = Group & {
+  position?: number;
+  muted?: true;
+  greet?: true;
+  others?: Array<Group & { position?: number }>;
+};
+
+/** Una manada: campo del formulario y su resolución valor → grupo */
+type HerdDim = {
+  fieldId: string;
+  // '' en la principal (claves de siempre); "campo~" en las adicionales, para
+  // que dos opciones iguales de campos distintos ("Otro") no compartan grupo
+  prefix: string;
+  resolve: (raw: unknown) => Group | null;
+};
+
+/** Clave del grupo `value` en la manada con prefijo `prefix` */
+export const herdGroupKey = (prefix: string, value: unknown) =>
+  prefix + herdKey(value);
+
+/**
+ * Manadas configuradas: la principal (fieldId, groupLabels… de siempre) y
+ * las adicionales, sin campos repetidos. Sin principal no hay manadas.
+ */
+export function herdDims(
+  config: EventHerdConfig,
+): Array<HerdExtraConfig & { prefix: string }> {
+  if (!config.fieldId) return [];
+  const seen = new Set([config.fieldId]);
+  const extras = (config.extraHerds ?? []).filter(
+    (h) =>
+      !!h?.fieldId &&
+      /^[\w-]+$/.test(h.fieldId) &&
+      !seen.has(h.fieldId) &&
+      !!seen.add(h.fieldId),
+  );
+  return [
+    {
+      fieldId: config.fieldId,
+      groupLabels: config.groupLabels,
+      excludedGroups: config.excludedGroups,
+      labelPattern: config.labelPattern,
+      singularPattern: config.singularPattern,
+      prefix: '',
+    },
+    ...extras.map((h) => ({ ...h, prefix: `${h.fieldId}~` })),
+  ];
+}
 
 /** Brazo del experimento: t = ve los mensajes, c = grupo de control */
 type Arm = 't' | 'c';
@@ -118,9 +178,12 @@ const UNTIL_END_MARGIN_MS = 5 * 60_000;
 /** Contexto por evento: config + resolución valor → grupo, con caché */
 type HerdContext = {
   config: EventHerdConfig;
+  // Campo de la manada principal (null = sin manadas)
   fieldId: string | null;
-  resolve: (raw: unknown) => Group | null;
-  // Claves de los grupos que no reciben mensajes
+  dims: HerdDim[];
+  // Grupos de un registrationData, uno por manada en la que tiene valor
+  groupsOf: (registrationData: any) => Group[];
+  // Claves (con prefijo) de los grupos que no reciben mensajes
   excludedKeys: Set<string>;
   holdoutPercent: number;
   loadedAt: number;
@@ -155,13 +218,15 @@ type HerdState = {
   // attendeeId → brazo del experimento. Se sortea la primera vez que se ve al
   // asistente y se persiste en /herd/{eventId}/arms (no cambia al volver)
   arms: Map<string, Arm>;
-  // uid → "clave|posición|muted" publicada en /herd/{eventId}/members (null = sin grupo)
+  // uid → entrada publicada en /herd/{eventId}/members, serializada (null = sin grupo)
   membersWritten: Map<string, string | null>;
   // UIDs presentes en el flush anterior: los que no estaban acaban de llegar
   activeUids: Set<string>;
+  // Conectados con algún grupo que recibe mensajes (alcance del privado manual)
+  audience: number;
 };
 
-type CachedGroup = { group: Group | null; at: number };
+type CachedGroup = { groups: Group[]; at: number };
 
 /** Asistente conectado: UID de Firebase (presencia) + su OrgAttendee */
 export type HerdMember = { uid: string; attendeeId: string };
@@ -201,13 +266,24 @@ export class HerdService {
     const event = await this.eventModel.findById(eventId).lean();
     if (!event) throw new NotFoundException('Event not found');
 
+    const named = (labels?: EventHerdConfig['groupLabels']) =>
+      (labels ?? []).filter((g) => g.label?.trim() || g.singular?.trim());
     const herdConfig: EventHerdConfig = {
       enabled: dto.enabled,
       fieldId: dto.fieldId || undefined,
-      groupLabels: (dto.groupLabels ?? []).filter(
-        (g) => g.label?.trim() || g.singular?.trim(),
-      ),
+      groupLabels: named(dto.groupLabels),
       excludedGroups: [...new Set(dto.excludedGroups ?? [])],
+      labelPattern: dto.labelPattern?.trim() || undefined,
+      singularPattern: dto.singularPattern?.trim() || undefined,
+      extraHerds: (dto.extraHerds ?? [])
+        .filter((h) => h.fieldId !== dto.fieldId)
+        .map((h) => ({
+          fieldId: h.fieldId,
+          groupLabels: named(h.groupLabels),
+          excludedGroups: [...new Set(h.excludedGroups ?? [])],
+          labelPattern: h.labelPattern?.trim() || undefined,
+          singularPattern: h.singularPattern?.trim() || undefined,
+        })),
       holdoutPercent: dto.holdoutPercent ?? 0,
       accentColor: dto.accentColor || DEFAULT_HERD_CONFIG.accentColor,
       privateMessage: {
@@ -254,28 +330,47 @@ export class HerdService {
   async mirrorConfig(eventId: string) {
     const ctx = await this.getContext(eventId, true);
     if (!ctx) return;
-    const field = await this.getField(eventId, ctx.config.fieldId);
-    const labels = this.labelOverrides(ctx.config);
+    const fields = await this.getFields(eventId);
 
-    const groups = (
-      (field?.options ?? []) as Array<{
-        value: string;
-        label: string;
-      }>
-    ).map((o) => {
-      const forms = herdGroupForms(
-        labels.get(String(o.value)),
-        String(o.label ?? o.value),
-      );
-      return {
-        key: herdKey(o.value),
-        value: String(o.value),
-        optionLabel: String(o.label ?? o.value),
-        label: forms.plural,
-        singular: forms.singular,
-        ...(ctx.excludedKeys.has(herdKey(o.value)) ? { excluded: true } : {}),
-      };
-    });
+    // Opciones de todas las manadas; las de las adicionales llevan su campo
+    const groups = herdDims(ctx.config)
+      .filter((d) => ctx.dims.some((x) => x.fieldId === d.fieldId))
+      .flatMap((d) => {
+        const labels = this.labelOverrides(d.groupLabels);
+        const field = fields.find((f) => f?.id === d.fieldId);
+        return (
+          (field?.options ?? []) as Array<{
+            value: string;
+            label: string;
+          }>
+        ).map((o) => {
+          const forms = herdGroupName(
+            labels.get(String(o.value)),
+            d,
+            String(o.label ?? o.value),
+          );
+          const key = herdGroupKey(d.prefix, o.value);
+          return {
+            key,
+            ...(d.prefix ? { fieldId: d.fieldId } : {}),
+            value: String(o.value),
+            optionLabel: String(o.label ?? o.value),
+            label: forms.plural,
+            singular: forms.singular,
+            ...(ctx.excludedKeys.has(key) ? { excluded: true } : {}),
+          };
+        });
+      });
+
+    // Manadas en orden, con el patrón para nombrar valores fuera de las opciones
+    const herds = herdDims(ctx.config)
+      .filter((d) => ctx.dims.some((x) => x.fieldId === d.fieldId))
+      .map((d) => ({
+        fieldId: d.fieldId,
+        prefix: d.prefix,
+        labelPattern: d.labelPattern,
+        singularPattern: d.singularPattern,
+      }));
 
     const { enabled, accentColor, privateMessage, publicMessage } = ctx.config;
     const greeting = {
@@ -291,6 +386,7 @@ export class HerdService {
           privateMessage,
           publicMessage,
           greeting,
+          herds,
           groups,
           // Claves excluidas, incluidas las que no son opción del formulario
           // ("-", "No Aplica" de registros importados): sin ellas el asistente
@@ -304,21 +400,63 @@ export class HerdService {
   }
 
   /** Formas escritas por el admin para cada opción (plural y/o singular) */
-  private labelOverrides(config: EventHerdConfig) {
+  private labelOverrides(groupLabels: EventHerdConfig['groupLabels']) {
     return new Map(
-      (config.groupLabels ?? []).map((g) => [String(g.value), g] as const),
+      (groupLabels ?? []).map((g) => [String(g.value), g] as const),
     );
   }
 
-  private async getField(eventId: string, fieldId?: string) {
-    if (!fieldId) return null;
+  /** Campos del formulario de registro de la organización del evento */
+  private async getFields(eventId: string): Promise<any[]> {
     const event = await this.eventModel.findById(eventId, { orgId: 1 }).lean();
-    if (!event) return null;
+    if (!event) return [];
     const org = await this.orgModel
       .findById(event.orgId, { 'registrationForm.fields': 1 })
       .lean();
-    const fields: any[] = (org as any)?.registrationForm?.fields ?? [];
-    return fields.find((f) => f?.id === fieldId) ?? null;
+    return (org as any)?.registrationForm?.fields ?? [];
+  }
+
+  /** Resolución valor → grupo de una manada sobre las opciones de su campo */
+  private buildDim(
+    d: HerdExtraConfig & { prefix: string },
+    field: any,
+  ): HerdDim {
+    const labels = this.labelOverrides(d.groupLabels);
+
+    // Un registro puede haber guardado el VALOR de la opción o su ETIQUETA:
+    // ambos se canonizan a la misma opción (igual que en el reporte).
+    const byNorm = new Map<string, { value: string; label: string }>();
+    for (const o of (field?.options ?? []) as Array<{
+      value: string;
+      label: string;
+    }>) {
+      const opt = { value: String(o.value), label: String(o.label ?? o.value) };
+      byNorm.set(norm(o.label), opt);
+      byNorm.set(norm(o.value), opt);
+    }
+
+    const resolve = (raw: unknown): Group | null => {
+      const v = Array.isArray(raw) ? raw[0] : raw;
+      if (v == null || typeof v === 'object' || !String(v).trim()) return null;
+      const opt = byNorm.get(norm(v));
+      if (opt) {
+        const forms = herdGroupName(labels.get(opt.value), d, opt.label);
+        return {
+          key: herdGroupKey(d.prefix, opt.value),
+          label: forms.plural,
+          singular: forms.singular,
+        };
+      }
+      // Campo de texto libre (o valor fuera de las opciones): agrupa por texto normalizado
+      const text = String(v).trim();
+      const forms = herdGroupName(undefined, d, text);
+      return {
+        key: herdGroupKey(d.prefix, v),
+        label: forms.plural,
+        singular: forms.singular,
+      };
+    };
+    return { fieldId: String(field.id), prefix: d.prefix, resolve };
   }
 
   private async getContext(
@@ -339,48 +477,42 @@ export class HerdService {
       .lean();
     if (!event) return null;
     const config: EventHerdConfig = event.herdConfig ?? { enabled: false };
-    const field = await this.getField(eventId, config.fieldId);
-    const labels = this.labelOverrides(config);
+    const configured = herdDims(config);
+    const fields = configured.length ? await this.getFields(eventId) : [];
 
-    // Un registro puede haber guardado el VALOR de la opción o su ETIQUETA:
-    // ambos se canonizan a la misma opción (igual que en el reporte).
-    const byNorm = new Map<string, { value: string; label: string }>();
-    for (const o of (field?.options ?? []) as Array<{
-      value: string;
-      label: string;
-    }>) {
-      const opt = { value: String(o.value), label: String(o.label ?? o.value) };
-      byNorm.set(norm(o.label), opt);
-      byNorm.set(norm(o.value), opt);
+    // Manadas cuyo campo sigue en el formulario; sin la principal, ninguna
+    const dims: HerdDim[] = [];
+    const excludedKeys = new Set<string>();
+    for (const d of configured) {
+      const field = fields.find((f) => f?.id === d.fieldId);
+      if (!field) {
+        if (!d.prefix) break;
+        continue;
+      }
+      dims.push(this.buildDim(d, field));
+      for (const v of d.excludedGroups ?? []) {
+        excludedKeys.add(herdGroupKey(d.prefix, v));
+      }
     }
 
-    const resolve = (raw: unknown): Group | null => {
-      const v = Array.isArray(raw) ? raw[0] : raw;
-      if (v == null || typeof v === 'object' || !String(v).trim()) return null;
-      const opt = byNorm.get(norm(v));
-      if (opt) {
-        const forms = herdGroupForms(labels.get(opt.value), opt.label);
-        return {
-          key: herdKey(opt.value),
-          label: forms.plural,
-          singular: forms.singular,
-        };
-      }
-      // Campo de texto libre (o valor fuera de las opciones): agrupa por texto normalizado
-      const text = String(v).trim();
-      return { key: herdKey(v), label: text, singular: text };
-    };
+    const groupsOf = (data: any): Group[] =>
+      dims
+        .map((d) => d.resolve(data?.[d.fieldId]))
+        .filter((g): g is Group => !!g);
 
-    const prevFieldId = cached?.fieldId ?? null;
+    const prevFields = cached?.dims.map((d) => d.fieldId).join('|') ?? '';
     const ctx: HerdContext = {
       config,
-      fieldId: field ? String(field.id) : null,
-      resolve,
-      excludedKeys: new Set((config.excludedGroups ?? []).map(herdKey)),
+      fieldId: dims[0]?.fieldId ?? null,
+      dims,
+      groupsOf,
+      excludedKeys,
       holdoutPercent: Math.min(90, Math.max(0, config.holdoutPercent ?? 0)),
       loadedAt: Date.now(),
     };
-    if (prevFieldId !== ctx.fieldId) this.attendeeGroups.delete(eventId);
+    if (prevFields !== dims.map((d) => d.fieldId).join('|')) {
+      this.attendeeGroups.delete(eventId);
+    }
     this.contexts.set(eventId, ctx);
     return ctx;
   }
@@ -417,7 +549,7 @@ export class HerdService {
 
   private async process(eventId: string, members: HerdMember[]) {
     const ctx = await this.getContext(eventId);
-    if (!ctx?.config.enabled || !ctx.fieldId) return;
+    if (!ctx?.config.enabled || !ctx.dims.length) return;
 
     // Una persona con varias pestañas cuenta una vez
     const attendeeIds = [...new Set(members.map((m) => m.attendeeId))];
@@ -440,6 +572,7 @@ export class HerdService {
       registered: {},
       registeredTotal: 0,
       registeredAt: 0,
+      audience: 0,
     };
     this.states.set(eventId, state);
 
@@ -454,13 +587,14 @@ export class HerdService {
 
     const groups = await this.resolveGroups(eventId, ctx, attendeeIds, arrived);
 
+    // Cada asistente suma en el grupo de cada manada en la que tiene valor
     const counts: Record<string, number> = {};
     const labels = new Map<string, Group>();
     for (const id of attendeeIds) {
-      const g = groups.get(id);
-      if (!g) continue;
-      counts[g.key] = (counts[g.key] ?? 0) + 1;
-      labels.set(g.key, g);
+      for (const g of groups.get(id) ?? []) {
+        counts[g.key] = (counts[g.key] ?? 0) + 1;
+        labels.set(g.key, g);
+      }
     }
     const total = attendeeIds.length;
 
@@ -468,13 +602,13 @@ export class HerdService {
     // ve al asistente en ese grupo y no cambia aunque salga y vuelva.
     const arrivalUpdates: Record<string, number> = {};
     for (const id of attendeeIds) {
-      const g = groups.get(id);
-      if (!g) continue;
-      const order = state.arrivals.get(g.key) ?? new Map<string, number>();
-      state.arrivals.set(g.key, order);
-      if (order.has(id)) continue;
-      order.set(id, order.size + 1);
-      arrivalUpdates[`${g.key}/${id}`] = order.size;
+      for (const g of groups.get(id) ?? []) {
+        const order = state.arrivals.get(g.key) ?? new Map<string, number>();
+        state.arrivals.set(g.key, order);
+        if (order.has(id)) continue;
+        order.set(id, order.size + 1);
+        arrivalUpdates[`${g.key}/${id}`] = order.size;
+      }
     }
     if (Object.keys(arrivalUpdates).length) {
       await this.rtdb.ref(`/herd/${eventId}/arrivals`).update(arrivalUpdates);
@@ -484,7 +618,7 @@ export class HerdService {
     // control (no ve mensajes) o tratamiento, con la probabilidad configurada
     const armUpdates: Record<string, Arm> = {};
     for (const id of attendeeIds) {
-      if (!groups.get(id) || state.arms.has(id)) continue;
+      if (!groups.get(id)?.length || state.arms.has(id)) continue;
       const arm: Arm = Math.random() * 100 < ctx.holdoutPercent ? 'c' : 't';
       state.arms.set(id, arm);
       armUpdates[id] = arm;
@@ -493,21 +627,29 @@ export class HerdService {
       await this.rtdb.ref(`/herd/${eventId}/arms`).update(armUpdates);
     }
 
-    // Grupo propio de cada asistente (y su orden de llegada), para su mensaje
-    // privado: así la página no depende de tener el registrationData (según
-    // cómo inició sesión puede no tenerlo). Solo se escribe al llegar o si su
-    // grupo cambió.
+    // Grupos propios de cada asistente (y su orden de llegada en cada uno),
+    // para sus mensajes privados: así la página no depende de tener el
+    // registrationData (según cómo inició sesión puede no tenerlo). Solo se
+    // escribe al llegar o si sus grupos cambiaron.
     const memberUpdates: Record<string, MemberEntry | null> = {};
+    let audience = 0;
+    const seen = new Set<string>();
     for (const m of members) {
-      const g = groups.get(m.attendeeId) ?? null;
-      const position = g
-        ? state.arrivals.get(g.key)?.get(m.attendeeId)
-        : undefined;
-      const muted = !!g && this.isMuted(ctx, state, m.attendeeId, g.key);
-      // Botón «👋 Saludar» en su anuncio individual (saludo activo y en el
-      // brazo con botón del experimento del saludo)
+      const all = groups.get(m.attendeeId) ?? [];
+      // Los grupos excluidos no le dan mensajes; si todos lo están, silenciado
+      const shown = all.filter((g) => !ctx.excludedKeys.has(g.key));
+      const muted =
+        all.length > 0 && this.isMuted(ctx, state, m.attendeeId, all);
+      if (all.length && !muted && !seen.has(m.attendeeId)) audience++;
+      seen.add(m.attendeeId);
+      const withPosition = (g: Group) => {
+        const position = state.arrivals.get(g.key)?.get(m.attendeeId);
+        return { ...g, ...(position ? { position } : {}) };
+      };
+      // Botón «👋 Saludar» en sus anuncios individuales (saludo activo y en
+      // el brazo con botón del experimento del saludo)
       const greet =
-        !!g &&
+        all.length > 0 &&
         !muted &&
         !!ctx.config.greeting?.enabled &&
         greetingHasButton(
@@ -515,17 +657,18 @@ export class HerdService {
           m.attendeeId,
           ctx.config.greeting?.holdoutPercent ?? 0,
         );
-      const entry: MemberEntry | null = g
+      const main = shown[0] ?? all[0];
+      const entry: MemberEntry | null = main
         ? {
-            ...g,
-            ...(position ? { position } : {}),
+            ...withPosition(main),
             ...(muted ? { muted: true as const } : {}),
             ...(greet ? { greet: true as const } : {}),
+            ...(!muted && shown.length > 1
+              ? { others: shown.slice(1).map(withPosition) }
+              : {}),
           }
         : null;
-      const written = g
-        ? `${g.key}|${position ?? ''}|${muted ? 1 : 0}|${greet ? 1 : 0}`
-        : null;
+      const written = entry ? JSON.stringify(entry) : null;
       if (
         state.membersWritten.has(m.uid) &&
         state.membersWritten.get(m.uid) === written
@@ -542,6 +685,7 @@ export class HerdService {
     state.counts = counts;
     state.labels = labels;
     state.total = total;
+    state.audience = audience;
 
     await this.refreshRegistered(eventId, ctx, state);
     const { registered, registeredTotal } = state;
@@ -667,8 +811,15 @@ export class HerdService {
     const now = Date.now();
     if (now - state.registeredAt < this.REGISTERED_TTL_MS) return;
     state.registeredAt = now;
-    // El id del campo se usa como ruta en la agregación
-    if (!ctx.fieldId || !/^[\w-]+$/.test(ctx.fieldId)) return;
+    // El id de cada campo se usa como ruta en la agregación
+    const fieldIds = ctx.dims
+      .map((d) => d.fieldId)
+      .filter((id) => /^[\w-]+$/.test(id));
+    if (!fieldIds.length) return;
+    // Se agrupa por la combinación de valores de todas las manadas
+    const projection = Object.fromEntries(
+      fieldIds.map((id) => [id, `$registrationData.${id}`]),
+    );
     try {
       const rows: Array<{ _id: unknown; n: number }> =
         await this.eventUserModel.aggregate([
@@ -680,7 +831,7 @@ export class HerdService {
               let: { aid: { $toObjectId: '$attendeeId' } },
               pipeline: [
                 { $match: { $expr: { $eq: ['$_id', '$aid'] } } },
-                { $project: { v: `$registrationData.${ctx.fieldId}` } },
+                { $project: { v: projection } },
               ],
               as: 'a',
             },
@@ -693,8 +844,9 @@ export class HerdService {
       let registeredTotal = 0;
       for (const { _id, n } of rows) {
         registeredTotal += n;
-        const g = ctx.resolve(_id);
-        if (g) registered[g.key] = (registered[g.key] ?? 0) + n;
+        for (const g of ctx.groupsOf(_id)) {
+          registered[g.key] = (registered[g.key] ?? 0) + n;
+        }
       }
       state.registered = registered;
       state.registeredTotal = registeredTotal;
@@ -706,17 +858,17 @@ export class HerdService {
   }
 
   /**
-   * ¿El asistente no debe ver mensajes? Su grupo está excluido, o cayó en el
-   * grupo de control mientras el experimento está activo (holdout > 0).
+   * ¿El asistente no debe ver mensajes? Todos sus grupos están excluidos, o
+   * cayó en el grupo de control mientras el experimento está activo (holdout > 0).
    */
   private isMuted(
     ctx: HerdContext,
     state: HerdState,
     attendeeId: string,
-    key: string,
+    groups: Group[],
   ) {
     return (
-      ctx.excludedKeys.has(key) ||
+      groups.every((g) => ctx.excludedKeys.has(g.key)) ||
       (ctx.holdoutPercent > 0 && state.arms.get(attendeeId) === 'c')
     );
   }
@@ -761,7 +913,7 @@ export class HerdService {
     ctx: HerdContext,
     attendeeIds: string[],
     forceRefresh: Set<string>,
-  ): Promise<Map<string, Group | null>> {
+  ): Promise<Map<string, Group[]>> {
     const cache: Map<string, CachedGroup> =
       this.attendeeGroups.get(eventId) ?? new Map();
     this.attendeeGroups.set(eventId, cache);
@@ -771,18 +923,32 @@ export class HerdService {
       const c = cache.get(id);
       return !c || forceRefresh.has(id) || now - c.at > this.GROUP_TTL_MS;
     });
-    if (missing.length && ctx.fieldId) {
-      const path = `registrationData.${ctx.fieldId}`;
-      const docs = await this.orgAttendeeModel
-        .find({ _id: { $in: missing } }, { [path]: 1 })
-        .lean();
-      const found = new Map(docs.map((d: any) => [String(d._id), d]));
+    if (missing.length) {
+      const found = await this.readGroups(ctx, missing);
       for (const id of missing) {
-        const raw = found.get(id)?.registrationData?.[ctx.fieldId];
-        cache.set(id, { group: ctx.resolve(raw), at: now });
+        cache.set(id, { groups: found.get(id) ?? [], at: now });
       }
     }
-    return new Map(attendeeIds.map((id) => [id, cache.get(id)?.group ?? null]));
+    return new Map(attendeeIds.map((id) => [id, cache.get(id)?.groups ?? []]));
+  }
+
+  /** Grupos actuales de cada asistente (uno por manada en la que tiene valor) */
+  private async readGroups(
+    ctx: HerdContext,
+    attendeeIds: string[],
+  ): Promise<Map<string, Group[]>> {
+    const result = new Map<string, Group[]>();
+    if (!attendeeIds.length || !ctx.dims.length) return result;
+    const projection = Object.fromEntries(
+      ctx.dims.map((d) => [`registrationData.${d.fieldId}`, 1]),
+    );
+    const docs = await this.orgAttendeeModel
+      .find({ _id: { $in: attendeeIds } }, projection)
+      .lean();
+    for (const d of docs as any[]) {
+      result.set(String(d._id), ctx.groupsOf(d.registrationData));
+    }
+    return result;
   }
 
   /**
@@ -829,9 +995,8 @@ export class HerdService {
         ...(text?.trim() ? { text: text.trim() } : {}),
         at: admin.database.ServerValue.TIMESTAMP,
       });
-      const reached = key
-        ? (state.counts[key] ?? 0)
-        : entries.reduce((sum, [, n]) => sum + n, 0);
+      // Sin grupo: cada conectado con mensajes una vez, aunque esté en varias manadas
+      const reached = key ? (state.counts[key] ?? 0) : state.audience;
       return { type, key: key ?? null, count: reached };
     }
 
@@ -879,20 +1044,8 @@ export class HerdService {
     const arms = await this.loadArms(eventId);
     const attendeeIds = [...arms.keys()];
 
-    // Grupo actual de cada asistente del experimento (para separar excluidos)
-    const groupKey = new Map<string, string | null>();
-    if (attendeeIds.length && ctx.fieldId) {
-      const path = `registrationData.${ctx.fieldId}`;
-      const docs = await this.orgAttendeeModel
-        .find({ _id: { $in: attendeeIds } }, { [path]: 1 })
-        .lean();
-      for (const d of docs as any[]) {
-        groupKey.set(
-          String(d._id),
-          ctx.resolve(d.registrationData?.[ctx.fieldId])?.key ?? null,
-        );
-      }
-    }
+    // Grupos actuales de cada asistente del experimento (para separar excluidos)
+    const groupsById = await this.readGroups(ctx, attendeeIds);
 
     // EventUser → asistente, y visualización acumulada por EventUser
     const eventUsers = await this.eventUserModel
@@ -948,9 +1101,10 @@ export class HerdService {
         notLive++;
         continue;
       }
-      const key = groupKey.get(aid);
+      // Excluido = tiene grupos y todos están excluidos (no vio mensajes)
+      const groups = groupsById.get(aid) ?? [];
       const bucket =
-        key && ctx.excludedKeys.has(key)
+        groups.length && groups.every((g) => ctx.excludedKeys.has(g.key))
           ? 'excluded'
           : arm === 'c'
             ? 'control'
@@ -1006,15 +1160,14 @@ export class HerdService {
     };
   }
 
-  /** Config, grupos excluidos y resolución de grupo (para el informe del saludo) */
+  /** Config, grupos excluidos y grupos de cada asistente (para el informe del saludo) */
   async contextFor(eventId: string) {
     const ctx = await this.getContext(eventId);
     if (!ctx) return null;
     return {
       config: ctx.config,
-      fieldId: ctx.fieldId,
       excludedKeys: ctx.excludedKeys,
-      resolve: ctx.resolve,
+      groupsFor: (attendeeIds: string[]) => this.readGroups(ctx, attendeeIds),
       arms: await this.loadArms(eventId),
     };
   }

@@ -1,11 +1,13 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsIn,
   IsInt,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -37,6 +39,36 @@ class HerdGroupLabelDto {
   @IsString()
   @MaxLength(80)
   singular?: string;
+}
+
+/** Manada adicional (otro campo del formulario) */
+class HerdExtraDto {
+  // Se usa como ruta en Mongo y en las claves de RTDB
+  @IsString()
+  @Matches(/^[\w-]+$/)
+  fieldId!: string;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => HerdGroupLabelDto)
+  groupLabels?: HerdGroupLabelDto[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(200, { each: true })
+  excludedGroups?: string[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  labelPattern?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  singularPattern?: string;
 }
 
 /** Apariencia del banner: mismas opciones que los anuncios del estudio */
@@ -206,6 +238,24 @@ export class UpdateHerdConfigDto {
   @IsString({ each: true })
   @MaxLength(200, { each: true })
   excludedGroups?: string[];
+
+  // Nombre de los grupos sin nombre propio ("colegas de {valor}")
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  labelPattern?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  singularPattern?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(5)
+  @ValidateNested({ each: true })
+  @Type(() => HerdExtraDto)
+  extraHerds?: HerdExtraDto[];
 
   // % al azar en el grupo de control (sin mensajes)
   @IsOptional()
