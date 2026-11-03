@@ -27,6 +27,7 @@ import { HerdGreetingActionDto } from './dtos/herd-greeting-action.dto';
 /** Lo que el backend publicó del asistente en /herd/{eventId}/members/{uid} */
 type MemberGroup = { key: string; label: string; singular?: string };
 type MemberEntry = MemberGroup & {
+  title?: string; // tratamiento formal ("Dr(a).")
   muted?: boolean;
   greet?: boolean;
   // Grupos de las demás manadas
@@ -109,8 +110,22 @@ export class HerdGreetingService {
     return (snap.val() as MemberEntry | null) ?? null;
   }
 
-  /** Asistente (OrgAttendee) y su primer nombre a partir del UID de la sesión */
-  private async who(eventId: string, uid: string, fallbackName?: string) {
+  /**
+   * Asistente (OrgAttendee) y su primer nombre a partir del UID de la sesión,
+   * con el tratamiento formal que publicó el backend ("Dr(a). Ana")
+   */
+  private async who(
+    eventId: string,
+    uid: string,
+    fallbackName?: string,
+    title?: string,
+  ) {
+    const r = await this.whoPlain(eventId, uid, fallbackName);
+    const t = title?.trim();
+    return t && r.name !== 'Un colega' ? { ...r, name: `${t} ${r.name}` } : r;
+  }
+
+  private async whoPlain(eventId: string, uid: string, fallbackName?: string) {
     const eu = await this.eventUserModel
       .findOne({ eventId, firebaseUID: uid }, { attendeeId: 1 })
       .lean();
@@ -213,7 +228,12 @@ export class HerdGreetingService {
       });
     }
 
-    const { attendeeId, name } = await this.who(eventId, uid, dto.name);
+    const { attendeeId, name } = await this.who(
+      eventId,
+      uid,
+      dto.name,
+      member.title,
+    );
     const live = await this.rtdb
       .ref(`/herd/${eventId}/live/counts/${group.key}`)
       .once('value');
@@ -264,7 +284,12 @@ export class HerdGreetingService {
       throw new ForbiddenException('El saludo es de otro grupo');
     }
 
-    const { attendeeId, name } = await this.who(eventId, uid, dto.name);
+    const { attendeeId, name } = await this.who(
+      eventId,
+      uid,
+      dto.name,
+      member.title,
+    );
     try {
       await this.greetingModel.create({
         eventId,

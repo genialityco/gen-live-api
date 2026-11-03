@@ -54,6 +54,7 @@ export const DEFAULT_HERD_CONFIG: Required<
     | 'labelPattern'
     | 'singularPattern'
     | 'extraHerds'
+    | 'formalTitle'
   >
 > = {
   enabled: false,
@@ -90,6 +91,9 @@ export const DEFAULT_HERD_CONFIG: Required<
   },
 };
 
+/** Tratamiento formal por defecto (no se sabe el género del asistente) */
+export const DEFAULT_FORMAL_TITLE = 'Dr(a).';
+
 /**
  * ¿Este asistente ve el botón «👋 Saludar»? Sorteo determinista por evento y
  * asistente (FNV-1a): no hay que persistirlo y el informe lo recalcula igual.
@@ -122,6 +126,7 @@ type Group = { key: string; label: string; singular: string };
  */
 type MemberEntry = Group & {
   position?: number;
+  title?: string; // tratamiento formal ("Dr(a).") antes de su nombre
   muted?: true;
   greet?: true;
   others?: Array<Group & { position?: number }>;
@@ -186,6 +191,9 @@ type HerdContext = {
   // Claves (con prefijo) de los grupos que no reciben mensajes
   excludedKeys: Set<string>;
   holdoutPercent: number;
+  // Tratamiento formal: campo, texto y valores normalizados (valor y
+  // etiqueta de cada opción elegida) que lo llevan; null = sin tratamiento
+  title: { fieldId: string; text: string; accepted: Set<string> } | null;
   loadedAt: number;
 };
 
@@ -226,7 +234,7 @@ type HerdState = {
   audience: number;
 };
 
-type CachedGroup = { groups: Group[]; at: number };
+type CachedGroup = { groups: Group[]; title?: string; at: number };
 
 /** Asistente conectado: UID de Firebase (presencia) + su OrgAttendee */
 export type HerdMember = { uid: string; attendeeId: string };
@@ -285,6 +293,14 @@ export class HerdService {
           singularPattern: h.singularPattern?.trim() || undefined,
         })),
       holdoutPercent: dto.holdoutPercent ?? 0,
+      formalTitle:
+        dto.formalTitle?.fieldId && dto.formalTitle.values?.length
+          ? {
+              fieldId: dto.formalTitle.fieldId,
+              values: [...new Set(dto.formalTitle.values)],
+              text: dto.formalTitle.text?.trim() || DEFAULT_FORMAL_TITLE,
+            }
+          : undefined,
       accentColor: dto.accentColor || DEFAULT_HERD_CONFIG.accentColor,
       privateMessage: {
         ...DEFAULT_HERD_CONFIG.privateMessage,
@@ -393,6 +409,16 @@ export class HerdService {
           // no sabe que está silenciado hasta que el backend publica su grupo
           excludedKeys: [...ctx.excludedKeys],
           holdoutPercent: ctx.holdoutPercent,
+          // Respaldo del tratamiento mientras el backend no publica el miembro
+          ...(ctx.title
+            ? {
+                formalTitle: {
+                  fieldId: ctx.title.fieldId,
+                  text: ctx.title.text,
+                  accepted: [...ctx.title.accepted],
+                },
+              }
+            : {}),
           updatedAt: Date.now(),
         }),
       ),
@@ -459,6 +485,46 @@ export class HerdService {
     return { fieldId: String(field.id), prefix: d.prefix, resolve };
   }
 
+  /**
+   * Tratamiento formal: valores aceptados (valor y etiqueta normalizados de
+   * cada opción elegida, igual que buildDim) si el campo sigue en el formulario
+   */
+  private buildTitle(
+    config: EventHerdConfig,
+    fields: any[],
+  ): HerdContext['title'] {
+    const t = config.formalTitle;
+    if (!t?.fieldId || !/^[\w-]+$/.test(t.fieldId) || !t.values?.length) {
+      return null;
+    }
+    const field = fields.find((f) => f?.id === t.fieldId);
+    if (!field) return null;
+    const options = (field.options ?? []) as Array<{
+      value: string;
+      label: string;
+    }>;
+    const accepted = new Set<string>();
+    for (const v of t.values) {
+      accepted.add(norm(v));
+      const opt = options.find((o) => String(o.value) === v);
+      if (opt?.label) accepted.add(norm(opt.label));
+    }
+    return {
+      fieldId: t.fieldId,
+      text: t.text?.trim() || DEFAULT_FORMAL_TITLE,
+      accepted,
+    };
+  }
+
+  /** Tratamiento del asistente según su registrationData ('' = ninguno) */
+  private titleOf(ctx: HerdContext, data: any): string {
+    if (!ctx.title) return '';
+    const raw = data?.[ctx.title.fieldId];
+    const v = Array.isArray(raw) ? raw[0] : raw;
+    if (v == null || typeof v === 'object') return '';
+    return ctx.title.accepted.has(norm(v)) ? ctx.title.text : '';
+  }
+
   private async getContext(
     eventId: string,
     force = false,
@@ -479,6 +545,7 @@ export class HerdService {
     const config: EventHerdConfig = event.herdConfig ?? { enabled: false };
     const configured = herdDims(config);
     const fields = configured.length ? await this.getFields(eventId) : [];
+    const title = this.buildTitle(config, fields);
 
     // Manadas cuyo campo sigue en el formulario; sin la principal, ninguna
     const dims: HerdDim[] = [];
@@ -508,6 +575,7 @@ export class HerdService {
       groupsOf,
       excludedKeys,
       holdoutPercent: Math.min(90, Math.max(0, config.holdoutPercent ?? 0)),
+      title,
       loadedAt: Date.now(),
     };
     if (prevFields !== dims.map((d) => d.fieldId).join('|')) {
@@ -658,9 +726,11 @@ export class HerdService {
           ctx.config.greeting?.holdoutPercent ?? 0,
         );
       const main = shown[0] ?? all[0];
+      const title = this.attendeeGroups.get(eventId)?.get(m.attendeeId)?.title;
       const entry: MemberEntry | null = main
         ? {
             ...withPosition(main),
+            ...(title ? { title } : {}),
             ...(muted ? { muted: true as const } : {}),
             ...(greet ? { greet: true as const } : {}),
             ...(!muted && shown.length > 1
@@ -924,9 +994,14 @@ export class HerdService {
       return !c || forceRefresh.has(id) || now - c.at > this.GROUP_TTL_MS;
     });
     if (missing.length) {
-      const found = await this.readGroups(ctx, missing);
+      const found = await this.readAttendees(ctx, missing);
       for (const id of missing) {
-        cache.set(id, { groups: found.get(id) ?? [], at: now });
+        const f = found.get(id);
+        cache.set(id, {
+          groups: f?.groups ?? [],
+          ...(f?.title ? { title: f.title } : {}),
+          at: now,
+        });
       }
     }
     return new Map(attendeeIds.map((id) => [id, cache.get(id)?.groups ?? []]));
@@ -937,16 +1012,30 @@ export class HerdService {
     ctx: HerdContext,
     attendeeIds: string[],
   ): Promise<Map<string, Group[]>> {
-    const result = new Map<string, Group[]>();
+    const found = await this.readAttendees(ctx, attendeeIds);
+    return new Map([...found].map(([id, f]) => [id, f.groups]));
+  }
+
+  /** Grupos y tratamiento formal de cada asistente según su registro */
+  private async readAttendees(
+    ctx: HerdContext,
+    attendeeIds: string[],
+  ): Promise<Map<string, { groups: Group[]; title: string }>> {
+    const result = new Map<string, { groups: Group[]; title: string }>();
     if (!attendeeIds.length || !ctx.dims.length) return result;
+    const fieldIds = new Set(ctx.dims.map((d) => d.fieldId));
+    if (ctx.title) fieldIds.add(ctx.title.fieldId);
     const projection = Object.fromEntries(
-      ctx.dims.map((d) => [`registrationData.${d.fieldId}`, 1]),
+      [...fieldIds].map((f) => [`registrationData.${f}`, 1]),
     );
     const docs = await this.orgAttendeeModel
       .find({ _id: { $in: attendeeIds } }, projection)
       .lean();
     for (const d of docs as any[]) {
-      result.set(String(d._id), ctx.groupsOf(d.registrationData));
+      result.set(String(d._id), {
+        groups: ctx.groupsOf(d.registrationData),
+        title: this.titleOf(ctx, d.registrationData),
+      });
     }
     return result;
   }

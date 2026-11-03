@@ -71,6 +71,27 @@ class HerdExtraDto {
   singularPattern?: string;
 }
 
+/** Tratamiento formal antes del nombre ("Dr(a). Ana") */
+class HerdFormalTitleDto {
+  // Se usa como ruta en Mongo (proyección de registrationData)
+  @IsOptional()
+  @IsString()
+  @Matches(/^[\w-]*$/)
+  fieldId?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(200)
+  @IsString({ each: true })
+  @MaxLength(200, { each: true })
+  values?: string[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  text?: string;
+}
+
 /** Apariencia del banner: mismas opciones que los anuncios del estudio */
 class HerdStyleDto {
   @IsOptional()
@@ -263,6 +284,11 @@ export class UpdateHerdConfigDto {
   @Min(0)
   @Max(90)
   holdoutPercent?: number;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => HerdFormalTitleDto)
+  formalTitle?: HerdFormalTitleDto;
 
   @IsOptional()
   @IsString()

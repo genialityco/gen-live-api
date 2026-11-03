@@ -490,6 +490,50 @@ describe('HerdService', () => {
     expect(r.control).toMatchObject({ attendees: 1, avgPlaybackMin: 10 });
   });
 
+  describe('tratamiento formal', () => {
+    // El campo del tratamiento no es el de la manada: se lee igual
+    const titleConfig = {
+      ...baseConfig,
+      formalTitle: { fieldId: 'ciudad', values: ['bogota'], text: 'Dr(a).' },
+    };
+
+    it('publica el tratamiento de quien tiene una de las opciones, por valor o etiqueta', async () => {
+      const { svc, writes } = setup(titleConfig);
+      await svc.onActiveAttendees('ev1', m(['a1', 'a3', 'a4']));
+
+      const members = writes.find((w) => w.path === '/herd/ev1/members');
+      expect(members?.value.ua1.title).toBe('Dr(a).'); // valor
+      expect(members?.value.ua3.title).toBe('Dr(a).'); // etiqueta "Bogotá"
+      expect(members?.value.ua4.title).toBeUndefined(); // sin ciudad
+    });
+
+    it('espeja en la config los valores aceptados (valor y etiqueta normalizados)', async () => {
+      const { svc, writes } = setup(titleConfig);
+      await svc.mirrorConfig('ev1');
+
+      const config = writes.find((w) => w.path === '/herd/ev1/config');
+      expect(config?.value.formalTitle).toEqual({
+        fieldId: 'ciudad',
+        text: 'Dr(a).',
+        accepted: ['bogota'],
+      });
+    });
+
+    it('sin opciones elegidas no hay tratamiento', async () => {
+      const { svc, writes } = setup({
+        ...baseConfig,
+        formalTitle: { fieldId: 'ciudad', values: [] },
+      });
+      await svc.onActiveAttendees('ev1', m(['a1']));
+      await svc.mirrorConfig('ev1');
+
+      const members = writes.find((w) => w.path === '/herd/ev1/members');
+      expect(members?.value.ua1.title).toBeUndefined();
+      const config = writes.find((w) => w.path === '/herd/ev1/config');
+      expect(config?.value.formalTitle).toBeUndefined();
+    });
+  });
+
   describe('varias manadas', () => {
     const multiConfig = {
       ...baseConfig,

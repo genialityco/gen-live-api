@@ -96,6 +96,12 @@ export interface HerdExtraConfig {
   singularPattern?: string;
 }
 
+export interface HerdFormalTitleConfig {
+  fieldId?: string;
+  values?: string[]; // valores de las opciones que llevan el tratamiento
+  text?: string; // "Dr(a)." por defecto
+}
+
 export interface EventHerdConfig {
   enabled: boolean;
   fieldId?: string; // campo del formulario de la org que define la manada
@@ -117,6 +123,9 @@ export interface EventHerdConfig {
   // mensaje. La asignación se persiste en /herd/{eventId}/arms para comparar
   // la retención contra quienes sí los ven (0 = sin experimento)
   holdoutPercent?: number;
+  // Tratamiento formal antes de {nombre} ("Dr(a). Ana") para quienes tienen
+  // en `fieldId` una de las opciones de `values` (p. ej. Perfil = Médico)
+  formalTitle?: HerdFormalTitleConfig;
   accentColor?: string;
   privateMessage?: HerdMessageConfig & {
     // Los primeros N de cada grupo en conectarse ven `firstTemplate` con
