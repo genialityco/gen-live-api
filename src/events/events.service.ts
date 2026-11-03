@@ -1543,15 +1543,39 @@ export class EventsService implements OnModuleInit {
 
     // Campos que NO coinciden para el mejor candidato
     const mismatched: string[] = [];
+    // Identificadores que el registro nunca tuvo (p. ej. importaciones sin
+    // cédula): no hay contra qué comparar, así que se completan con lo digitado
+    const missingInRecord: [string, any][] = [];
     for (const [fieldId, value] of normalizedEntries) {
       const candidateVal =
         fieldId === 'email'
           ? bestCandidate.email
           : bestCandidate.registrationData?.[fieldId];
 
-      if (candidateVal !== value) {
+      if (
+        candidateVal === undefined ||
+        candidateVal === null ||
+        candidateVal === ''
+      ) {
+        missingInRecord.push([fieldId, value]);
+      } else if (candidateVal !== value) {
         mismatched.push(fieldId);
       }
+    }
+
+    if (mismatched.length === 0 && missingInRecord.length > 0) {
+      const $set: Record<string, any> = {};
+      for (const [fieldId, value] of missingInRecord) {
+        $set[fieldId === 'email' ? 'email' : `registrationData.${fieldId}`] =
+          value;
+      }
+      const updated = await this.orgAttendeeModel
+        .findByIdAndUpdate(bestCandidate._id, { $set }, { new: true })
+        .lean();
+      return {
+        found: true,
+        orgAttendee: updated ?? bestCandidate,
+      };
     }
 
     return {
