@@ -154,6 +154,54 @@ export interface EventHerdConfig {
   };
 }
 
+/**
+ * Logros del asistente: cada evento define sus propios hitos (tipo + umbral)
+ * y, al cumplirlos, el asistente recibe una felicitación privada, pública o
+ * ambas sobre el video. Ver MilestonesService.
+ */
+export type MilestoneType =
+  | 'watchMinutes' // minutos seguidos conectado durante el vivo
+  | 'pollsAnswered' // encuestas respondidas en el evento
+  | 'pollFirst' // de los primeros N en responder una encuesta
+  | 'greetingsSent' // saludos enviados a colegas
+  | 'totalMinutes' // minutos acumulados conectado durante el vivo
+  | 'firstToConnect' // de los primeros N en conectarse al evento
+  | 'frequentAttendee' // asistió a N eventos de la organización (contando este)
+  | 'manual'; // lo otorga el admin desde el panel
+
+export type MilestoneDelivery = 'private' | 'public' | 'both';
+
+export interface MilestoneDef {
+  id: string; // identificador estable (se guarda en cada logro otorgado)
+  enabled?: boolean;
+  type: MilestoneType;
+  threshold: number;
+  delivery: MilestoneDelivery;
+  // Variables: {nombre}, {umbral}, {valor}; vacía = texto por defecto del tipo
+  privateTemplate?: string;
+  // Variables: {nombres}, {cantidad}, {umbral}, {singular|plural}
+  publicTemplate?: string;
+}
+
+export interface EventMilestonesConfig {
+  enabled: boolean;
+  // % de asistentes que, al azar, no reciben felicitaciones (para medir)
+  holdoutPercent?: number;
+  accentColor?: string;
+  privateMessage?: Pick<
+    HerdMessageConfig,
+    'position' | 'durationSec' | 'label' | 'style'
+  >;
+  publicMessage?: Pick<
+    HerdMessageConfig,
+    'position' | 'durationSec' | 'label' | 'style'
+  > & {
+    minIntervalSec?: number; // separación mínima entre felicitaciones públicas
+    maxNames?: number; // nombres a mostrar antes de "y N colegas más"
+  };
+  items: MilestoneDef[];
+}
+
 @Schema({ timestamps: true })
 export class Event {
   @Prop({ type: Types.ObjectId, ref: 'Organization', required: true })
@@ -226,6 +274,9 @@ export class Event {
 
   @Prop({ type: Object })
   herdConfig?: EventHerdConfig;
+
+  @Prop({ type: Object })
+  milestonesConfig?: EventMilestonesConfig;
 
   @Prop({ default: false })
   hidden?: boolean;

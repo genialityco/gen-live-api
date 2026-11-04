@@ -6,6 +6,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -23,6 +24,7 @@ import {
   welchPValue,
 } from './herd.service';
 import { HerdGreetingActionDto } from './dtos/herd-greeting-action.dto';
+import { MilestonesService } from './milestones.service';
 
 /** Lo que el backend publicó del asistente en /herd/{eventId}/members/{uid} */
 type MemberGroup = { key: string; label: string; singular?: string };
@@ -86,6 +88,7 @@ export class HerdGreetingService {
     private viewingSessionModel: Model<ViewingSession>,
     private rtdb: RtdbService,
     private herd: HerdService,
+    @Optional() private milestones?: MilestonesService,
   ) {}
 
   private async greetingConfig(eventId: string) {
@@ -256,6 +259,10 @@ export class HerdGreetingService {
       recipients,
       greetingId: ref.key,
     });
+    // Logros: saludos enviados (no bloquea)
+    if (attendeeId) {
+      void this.milestones?.onGreetingSent(eventId, attendeeId, uid);
+    }
     return { ok: true, greetingId: ref.key, recipients, name };
   }
 

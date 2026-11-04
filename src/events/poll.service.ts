@@ -4,6 +4,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  Optional,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -22,6 +23,7 @@ import { RtdbService } from '../rtdb/rtdb.service';
 import { Event, EventDocument } from './schemas/event.schema';
 import { UserAccount } from '../users/schemas/user-account.schema';
 import { OrgAttendee } from '../organizations/schemas/org-attendee.schema';
+import { MilestonesService } from './milestones.service';
 
 @Injectable()
 export class PollService {
@@ -33,6 +35,7 @@ export class PollService {
     @InjectModel(OrgAttendee.name)
     private orgAttendeeModel: Model<OrgAttendee>,
     private rtdbService: RtdbService,
+    @Optional() private milestones?: MilestonesService,
   ) {}
 
   /**
@@ -444,6 +447,14 @@ export class PollService {
 
     // Sincronizar estadísticas en tiempo real
     await this.syncToRTDB(String(poll.eventId), updated);
+
+    // Logros: encuestas respondidas y primeros en responder (no bloquea)
+    void this.milestones?.onPollResponse(
+      String(poll.eventId),
+      String(orgAttendeeId),
+      userId,
+      updated.totalResponses,
+    );
 
     return updated;
   }

@@ -36,6 +36,11 @@ import { HerdService } from './herd.service';
 import { NetworkReportsService } from './network-reports.service';
 import { HerdGreetingService } from './herd-greeting.service';
 import { HerdGreetingActionDto } from './dtos/herd-greeting-action.dto';
+import { MilestonesService } from './milestones.service';
+import {
+  AwardMilestoneDto,
+  UpdateMilestonesConfigDto,
+} from './dtos/update-milestones-config.dto';
 import { ReportNetworkBlockDto } from './dtos/report-network-block.dto';
 import { RegisterToEventDto } from './dtos/register-to-event.dto';
 import { TransferEventDto } from './dtos/transfer-event.dto';
@@ -56,6 +61,7 @@ export class EventsController {
     private herd: HerdService,
     private networkReports: NetworkReportsService,
     private herdGreetings: HerdGreetingService,
+    private milestones: MilestonesService,
   ) {}
 
   // ENDPOINTS PÚBLICOS (sin autenticación)
@@ -333,6 +339,44 @@ export class EventsController {
   @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
   async herdGreetingReport(@Param('eventId') eventId: string) {
     return await this.herdGreetings.report(eventId);
+  }
+
+  // Configura los logros del asistente: hitos, entrega y apariencia (dueñ@ del evento)
+  @Patch(':eventId/milestones-config')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async updateMilestonesConfig(
+    @Param('eventId') eventId: string,
+    @Body() dto: UpdateMilestonesConfigDto,
+  ) {
+    return await this.milestones.updateConfig(eventId, dto);
+  }
+
+  // Conectados ahora, para elegir a quién felicitar con un logro manual (dueñ@ del evento)
+  @Get(':eventId/milestones/connected')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async milestonesConnected(@Param('eventId') eventId: string) {
+    return await this.milestones.connected(eventId);
+  }
+
+  // Otorga un logro manual a uno o varios asistentes (dueñ@ del evento)
+  @Post(':eventId/milestones/award')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async awardMilestone(
+    @Param('eventId') eventId: string,
+    @Body() dto: AwardMilestoneDto,
+  ) {
+    return await this.milestones.awardManual(
+      eventId,
+      dto.milestoneId,
+      dto.attendeeIds,
+    );
+  }
+
+  // Logros otorgados por hito y los más recientes (dueñ@ del evento)
+  @Get(':eventId/milestones/report')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async milestonesReport(@Param('eventId') eventId: string) {
+    return await this.milestones.report(eventId);
   }
 
   // La página del asistente reporta que su red bloquea el servidor del video

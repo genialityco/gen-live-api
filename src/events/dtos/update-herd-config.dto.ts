@@ -93,7 +93,7 @@ class HerdFormalTitleDto {
 }
 
 /** Apariencia del banner: mismas opciones que los anuncios del estudio */
-class HerdStyleDto {
+export class HerdStyleDto {
   @IsOptional()
   @IsIn(['bar', 'lowerThird', 'breaking', 'pill', 'glass'])
   template?: string;

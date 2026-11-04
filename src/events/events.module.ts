@@ -35,6 +35,11 @@ import {
   HerdAnnouncement,
   HerdAnnouncementSchema,
 } from './schemas/herd-announcement.schema';
+import { MilestonesService } from './milestones.service';
+import {
+  MilestoneAward,
+  MilestoneAwardSchema,
+} from './schemas/milestone-award.schema';
 import {
   NetworkBlockReport,
   NetworkBlockReportSchema,
@@ -74,6 +79,7 @@ import { Logger } from '@nestjs/common';
       { name: NetworkBlockReport.name, schema: NetworkBlockReportSchema },
       { name: HerdGreeting.name, schema: HerdGreetingSchema },
       { name: HerdAnnouncement.name, schema: HerdAnnouncementSchema },
+      { name: MilestoneAward.name, schema: MilestoneAwardSchema },
     ]),
     RtdbModule,
     forwardRef(() => OrganizationsModule),
@@ -91,6 +97,7 @@ import { Logger } from '@nestjs/common';
     HerdService,
     NetworkReportsService,
     HerdGreetingService,
+    MilestonesService,
   ],
   controllers: [EventsController, EventUserController, PollController],
   exports: [

@@ -1335,6 +1335,25 @@ export class HerdService {
     };
   }
 
+  /**
+   * Tratamiento formal ("Dr(a).") de cada asistente según la config de
+   * manada del evento ('' = ninguno). Lo usan los logros para nombrar igual
+   * que los anuncios de manada.
+   */
+  async formalTitles(
+    eventId: string,
+    attendees: Array<{ _id: unknown; registrationData?: any }>,
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const ctx = await this.getContext(eventId).catch(() => null);
+    if (!ctx?.title) return out;
+    for (const a of attendees) {
+      const t = this.titleOf(ctx, a.registrationData);
+      if (t) out.set(String(a._id), t);
+    }
+    return out;
+  }
+
   /** Libera el estado en memoria de un evento (al apagar su watcher) */
   clearEvent(eventId: string) {
     this.contexts.delete(eventId);

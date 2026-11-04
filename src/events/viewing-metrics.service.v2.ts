@@ -11,6 +11,7 @@ import { EventUser } from './schemas/event-user.schema';
 import { Event, EventDocument } from './schemas/event.schema';
 import { RtdbService } from '../rtdb/rtdb.service';
 import { HerdService } from './herd.service';
+import { MilestonesService } from './milestones.service';
 
 /**
  * ViewingMetricsService v2 - Basado en Firebase RTDB Presence
@@ -74,6 +75,7 @@ export class ViewingMetricsService {
     private eventModel: Model<EventDocument>,
     private rtdbService: RtdbService,
     private herdService: HerdService,
+    private milestones: MilestonesService,
   ) {
     // Limpiar caché de UIDs desconocidos cada 15 minutos
     setInterval(() => this.cleanUnknownUIDsCache(), 15 * 60 * 1000);
@@ -234,6 +236,7 @@ export class ViewingMetricsService {
       // Todos los usuarios se fueron — resetear contador a 0
       await this._persistMetrics(eventId, new Set(), isLive);
       void this.herdService.onActiveAttendees(eventId, [], isReplay);
+      void this.milestones.onPresence(eventId, [], isLive);
       return;
     }
 
@@ -306,6 +309,7 @@ export class ViewingMetricsService {
       // No hay usuarios registrados — persistir 0 concurrentes sin query adicional
       await this._persistMetrics(eventId, new Set(), isLive);
       void this.herdService.onActiveAttendees(eventId, [], isReplay);
+      void this.milestones.onPresence(eventId, [], isLive);
       return;
     }
 
@@ -456,19 +460,19 @@ export class ViewingMetricsService {
 
     // Anuncios de manada: conteos por grupo del registro (sin bloquear el
     // flush). En diferido no se pintan, así que el servicio no hace nada.
-    void this.herdService.onActiveAttendees(
-      eventId,
-      registeredUIDs.map((uid) => ({
-        uid,
-        attendeeId: String(eventUserMap.get(uid)!.attendeeId),
-      })),
-      isReplay,
-    );
+    const members = registeredUIDs.map((uid) => ({
+      uid,
+      attendeeId: String(eventUserMap.get(uid)!.attendeeId),
+    }));
+    void this.herdService.onActiveAttendees(eventId, members, isReplay);
+    // Logros: rachas de conexión (solo con el evento en vivo)
+    void this.milestones.onPresence(eventId, members, isLive);
   }
 
   /** Libera el estado de manada de un evento cuyo watcher se apagó */
   clearHerdState(eventId: string) {
     this.herdService.clearEvent(eventId);
+    this.milestones.clearEvent(eventId);
   }
 
   /**
