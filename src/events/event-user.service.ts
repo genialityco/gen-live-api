@@ -250,15 +250,21 @@ export class EventUserService {
     return !!session;
   }
 
-  async getLiveAttendees(eventId: string): Promise<any[]> {
-    // Solo sesiones con reproducción real en vivo. El conjunto de EventUsers
-    // distintos resultante coincide con liveViewers del informe (quien tiene
-    // playback total > 0 tiene al menos una sesión con playbackLiveSeconds > 0).
+  async getLiveAttendees(
+    eventId: string,
+    criteria: 'playback' | 'presence' = 'playback',
+  ): Promise<any[]> {
+    // 'playback' (por defecto): solo sesiones con reproducción real en vivo. El
+    // conjunto de EventUsers distintos coincide con liveViewers del informe.
+    // 'presence': toda sesión abierta durante el vivo (wasLiveDuringSession),
+    // reprodujera o no. Coincide con totalUniqueViewers de métricas; se usa en
+    // la exportación a Excel para entregar la cifra completa de conectados.
     const liveSessions = await this.viewingSessionModel
-      .find({
-        eventId,
-        playbackLiveSeconds: { $gt: 0 },
-      })
+      .find(
+        criteria === 'presence'
+          ? { eventId, wasLiveDuringSession: true }
+          : { eventId, playbackLiveSeconds: { $gt: 0 } },
+      )
       .lean();
 
     // Obtener IDs únicos de EventUsers
@@ -304,6 +310,7 @@ export class EventUserService {
           totalSessions: userSessions.length,
           totalWatchTimeSeconds: totalWatchTime,
           liveWatchTimeSeconds: liveWatchTime,
+          playedLive: liveWatchTime > 0,
           lastHeartbeat: userSessions[0]?.lastHeartbeat,
         },
       };
@@ -317,11 +324,24 @@ export class EventUserService {
   // (wasReplayDuringSession), lo que hacía este conteo mayor que el "Vieron en
   // diferido" del informe. Se alineó a reproducción real. No excluye a los
   // asistentes en vivo: una misma persona puede aparecer en ambas listas.
-  async getReplayAttendees(eventId: string): Promise<any[]> {
-    const filter: any = {
-      eventId,
-      playbackReplaySeconds: { $gt: 0 },
-    };
+  // criteria='presence': toda sesión abierta durante el diferido
+  // (wasReplayDuringSession), reprodujera o no; se usa en la exportación a Excel.
+  // Incluye también a quien tenga reproducción en diferido, para que sea siempre
+  // un superconjunto del criterio por defecto.
+  async getReplayAttendees(
+    eventId: string,
+    criteria: 'playback' | 'presence' = 'playback',
+  ): Promise<any[]> {
+    const filter: any =
+      criteria === 'presence'
+        ? {
+            eventId,
+            $or: [
+              { wasReplayDuringSession: true },
+              { playbackReplaySeconds: { $gt: 0 } },
+            ],
+          }
+        : { eventId, playbackReplaySeconds: { $gt: 0 } };
 
     const replaySessions = await this.viewingSessionModel.find(filter).lean();
 
@@ -364,6 +384,7 @@ export class EventUserService {
         viewingStats: {
           totalSessions: userSessions.length,
           replayWatchTimeSeconds: replayWatchTime,
+          playedReplay: replayWatchTime > 0,
           lastHeartbeat,
         },
       };

@@ -100,12 +100,28 @@ export class EventUserController {
   }
 
   @Get('event/:eventId/live-attendees')
-  async getLiveAttendees(@Param('eventId') eventId: string) {
-    return await this.eventUserService.getLiveAttendees(eventId);
+  async getLiveAttendees(
+    @Param('eventId') eventId: string,
+    @Query('criteria') criteria?: string,
+  ) {
+    // criteria=presence → todos los conectados durante el vivo (mismo criterio
+    // que "Total de Asistentes" de métricas). Por defecto: reproducción real.
+    return await this.eventUserService.getLiveAttendees(
+      eventId,
+      criteria === 'presence' ? 'presence' : 'playback',
+    );
   }
 
   @Get('event/:eventId/replay-attendees')
-  async getReplayAttendees(@Param('eventId') eventId: string) {
-    return await this.eventUserService.getReplayAttendees(eventId);
+  async getReplayAttendees(
+    @Param('eventId') eventId: string,
+    @Query('criteria') criteria?: string,
+  ) {
+    // criteria=presence → todos los conectados durante el diferido.
+    // Por defecto: reproducción real en diferido.
+    return await this.eventUserService.getReplayAttendees(
+      eventId,
+      criteria === 'presence' ? 'presence' : 'playback',
+    );
   }
 }
