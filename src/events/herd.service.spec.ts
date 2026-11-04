@@ -258,6 +258,43 @@ describe('HerdService', () => {
     ]);
   });
 
+  it('guarda cada anuncio público en el historial, sin frenarlo si Mongo falla', async () => {
+    jest.useFakeTimers({ now: 1_000_000 });
+    const { svc, writes } = setup(baseConfig);
+    const create = jest.fn(() => Promise.resolve());
+    (svc as any).announcementModel = { create };
+
+    await svc.onActiveAttendees('ev1', m(['a1']));
+    await svc.onActiveAttendees('ev1', m(['a1', 'a2'])); // crece endocrino
+    jest.setSystemTime(1_000_000 + 30_000);
+    await svc.announceNow('ev1', 'public', 'endocrinologia', 'Hola {grupo}');
+
+    expect(create.mock.calls.map((c: any[]) => c[0])).toMatchObject([
+      {
+        eventId: 'ev1',
+        trigger: 'growth',
+        groupKey: 'endocrinologia',
+        groupLabel: 'endocrinólogos',
+        count: 2,
+        total: 2,
+      },
+      {
+        eventId: 'ev1',
+        trigger: 'manual',
+        groupKey: 'endocrinologia',
+        count: 2,
+        text: 'Hola {grupo}',
+      },
+    ]);
+
+    // Si Mongo falla, el banner igual sale por RTDB
+    create.mockImplementation(() => Promise.reject(new Error('mongo caído')));
+    await expect(
+      svc.announceNow('ev1', 'public', 'endocrinologia'),
+    ).resolves.toBeDefined();
+    expect(writes.filter((w) => w.path === '/herd/ev1/public')).toHaveLength(3);
+  });
+
   it('el privado manual dispara el aviso para todos o para un grupo', async () => {
     const { svc, writes } = setup(baseConfig);
     await svc.onActiveAttendees('ev1', m(['a1', 'a2', 'a3']));

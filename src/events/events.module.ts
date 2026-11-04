@@ -32,6 +32,10 @@ import {
   HerdGreetingSchema,
 } from './schemas/herd-greeting.schema';
 import {
+  HerdAnnouncement,
+  HerdAnnouncementSchema,
+} from './schemas/herd-announcement.schema';
+import {
   NetworkBlockReport,
   NetworkBlockReportSchema,
 } from './schemas/network-block-report.schema';
@@ -69,6 +73,7 @@ import { Logger } from '@nestjs/common';
       { name: UserAccount.name, schema: UserAccountSchema },
       { name: NetworkBlockReport.name, schema: NetworkBlockReportSchema },
       { name: HerdGreeting.name, schema: HerdGreetingSchema },
+      { name: HerdAnnouncement.name, schema: HerdAnnouncementSchema },
     ]),
     RtdbModule,
     forwardRef(() => OrganizationsModule),

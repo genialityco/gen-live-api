@@ -21,6 +21,7 @@ import { Organization } from '../organizations/schemas/organization.schema';
 import { OrgAttendee } from '../organizations/schemas/org-attendee.schema';
 import { EventUser } from './schemas/event-user.schema';
 import { ViewingSession } from './schemas/viewing-session.schema';
+import { HerdAnnouncement } from './schemas/herd-announcement.schema';
 import { RtdbService } from '../rtdb/rtdb.service';
 import { UpdateHerdConfigDto } from './dtos/update-herd-config.dto';
 import { herdGroupName } from './herd-grammar';
@@ -266,6 +267,8 @@ export class HerdService {
     @InjectModel(EventUser.name) private eventUserModel: Model<EventUser>,
     @InjectModel(ViewingSession.name)
     private viewingSessionModel?: Model<ViewingSession>,
+    @InjectModel(HerdAnnouncement.name)
+    private announcementModel?: Model<HerdAnnouncement>,
   ) {}
 
   // ── Configuración ────────────────────────────────────────────────────────
@@ -867,6 +870,35 @@ export class HerdService {
       ...(repeat ? { repeat: true } : {}),
       at: admin.database.ServerValue.TIMESTAMP,
     });
+    this.logPublic(eventId, {
+      trigger: repeat ? 'repeat' : 'growth',
+      groupKey: key,
+      groupLabel: labels.get(key)?.label ?? key,
+      count: shown,
+      groupConnected: count,
+      total,
+      audience: state.audience,
+      registered: Math.max(registered[key] ?? 0, count),
+      registeredTotal: Math.max(registeredTotal, total),
+    });
+  }
+
+  /**
+   * Guarda el anuncio público en el historial (herd_announcements). No
+   * bloquea ni rompe el anuncio si Mongo falla: el banner ya salió por RTDB.
+   */
+  private logPublic(
+    eventId: string,
+    entry: Omit<HerdAnnouncement, 'eventId' | 'createdAt'>,
+  ) {
+    if (!this.announcementModel) return;
+    void this.announcementModel
+      .create({ eventId, ...entry })
+      .catch((err) =>
+        this.logger.warn(
+          `No se pudo guardar el anuncio público de ${eventId}: ${err?.message ?? err}`,
+        ),
+      );
   }
 
   /**
@@ -1111,6 +1143,18 @@ export class HerdService {
       at: admin.database.ServerValue.TIMESTAMP,
     };
     await this.rtdb.ref(`/herd/${eventId}/public`).set(payload);
+    this.logPublic(eventId, {
+      trigger: 'manual',
+      groupKey,
+      groupLabel: payload.label,
+      count,
+      groupConnected: count,
+      total: state.total,
+      audience: state.audience,
+      registered: payload.registered,
+      registeredTotal: payload.registeredTotal,
+      ...(payload.text ? { text: payload.text } : {}),
+    });
     return { type, key: groupKey, label: payload.label, count };
   }
 
@@ -1230,6 +1274,31 @@ export class HerdService {
     const t = buckets.treatment.map((v) => v.playbackMin);
     const c = buckets.control.map((v) => v.playbackMin);
     const diff = mean(t) - mean(c);
+
+    // Historial de anuncios públicos (desde que existe herd_announcements)
+    const announcements = this.announcementModel
+      ? await this.announcementModel
+          .find(
+            { eventId },
+            {
+              _id: 0,
+              trigger: 1,
+              groupKey: 1,
+              groupLabel: 1,
+              count: 1,
+              groupConnected: 1,
+              total: 1,
+              audience: 1,
+              text: 1,
+              createdAt: 1,
+            },
+          )
+          .sort({ createdAt: 1 })
+          .lean()
+      : [];
+    const byTrigger = { growth: 0, repeat: 0, manual: 0 };
+    for (const a of announcements) byTrigger[a.trigger]++;
+
     return {
       holdoutPercent: ctx.holdoutPercent,
       eventEnded: !!endedAt,
@@ -1238,6 +1307,11 @@ export class HerdService {
       treatment: summarize(buckets.treatment),
       control: summarize(buckets.control),
       excluded: summarize(buckets.excluded),
+      publicAnnouncements: {
+        total: announcements.length,
+        byTrigger,
+        items: announcements,
+      },
       // Diferencia de minutos reproducidos (tratamiento − control)
       lift: {
         playbackMin: round1(diff),
