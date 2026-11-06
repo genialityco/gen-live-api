@@ -36,6 +36,7 @@ import {
   HerdAnnouncementSchema,
 } from './schemas/herd-announcement.schema';
 import { MilestonesService } from './milestones.service';
+import { EngagementAnalysisService } from './engagement-analysis.service';
 import {
   MilestoneAward,
   MilestoneAwardSchema,
@@ -98,6 +99,7 @@ import { Logger } from '@nestjs/common';
     NetworkReportsService,
     HerdGreetingService,
     MilestonesService,
+    EngagementAnalysisService,
   ],
   controllers: [EventsController, EventUserController, PollController],
   exports: [

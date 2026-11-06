@@ -37,6 +37,7 @@ import { NetworkReportsService } from './network-reports.service';
 import { HerdGreetingService } from './herd-greeting.service';
 import { HerdGreetingActionDto } from './dtos/herd-greeting-action.dto';
 import { MilestonesService } from './milestones.service';
+import { EngagementAnalysisService } from './engagement-analysis.service';
 import {
   AwardMilestoneDto,
   UpdateMilestonesConfigDto,
@@ -62,6 +63,7 @@ export class EventsController {
     private networkReports: NetworkReportsService,
     private herdGreetings: HerdGreetingService,
     private milestones: MilestonesService,
+    private engagement: EngagementAnalysisService,
   ) {}
 
   // ENDPOINTS PÚBLICOS (sin autenticación)
@@ -217,6 +219,14 @@ export class EventsController {
   @UseGuards(FirebaseAuthGuard, OwnerGuard)
   async byOrg(@Param('orgId') orgId: string) {
     return this.svc.listByOrgId(orgId);
+  }
+
+  // Análisis de permanencia de la org: asistentes × eventos, con y sin
+  // mensajes (anuncios de manada y logros). Sólo dueño de la org.
+  @Get('by-org/:orgId/engagement-analysis')
+  @UseGuards(FirebaseAuthGuard, OwnerGuard)
+  async engagementAnalysis(@Param('orgId') orgId: string) {
+    return this.engagement.forOrg(orgId);
   }
 
   // Lee un evento (validación por dueñ@ del evento)
