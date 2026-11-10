@@ -9,6 +9,7 @@ import { EventUser } from './schemas/event-user.schema';
 import { ViewingSession } from './schemas/viewing-session.schema';
 import { HerdAnnouncement } from './schemas/herd-announcement.schema';
 import { MilestoneAward } from './schemas/milestone-award.schema';
+import { HerdGreeting } from './schemas/herd-greeting.schema';
 import { OrgAttendee } from '../organizations/schemas/org-attendee.schema';
 import { HerdService } from './herd.service';
 
@@ -27,6 +28,14 @@ export type EngagementKind = 'base' | 'herd' | 'milestones' | 'both';
  * - B: evento sin anuncios ni logros
  */
 export type ExposureStatus = 'T' | 'C' | 'X' | 'N' | 'B';
+
+/**
+ * Saludo entre colegas del asistente en un evento:
+ * [botón (1 vio el anuncio con botón · 0 control sin botón · null no vio
+ * anuncio individual), saludos enviados, saludos que devolvió, devoluciones
+ * que recibió a sus saludos]
+ */
+export type GreetingVisit = [1 | 0 | null, number, number, number];
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
 
@@ -72,6 +81,8 @@ export class EngagementAnalysisService {
     private awardModel: Model<MilestoneAward>,
     @InjectModel(OrgAttendee.name)
     private orgAttendeeModel: Model<OrgAttendee>,
+    @InjectModel(HerdGreeting.name)
+    private greetingModel: Model<HerdGreeting>,
     private herd: HerdService,
   ) {}
 
@@ -89,6 +100,8 @@ export class EngagementAnalysisService {
           createdAt: 1,
           'herdConfig.enabled': 1,
           'herdConfig.holdoutPercent': 1,
+          'herdConfig.greeting.enabled': 1,
+          'herdConfig.greeting.holdoutPercent': 1,
           'milestonesConfig.enabled': 1,
           'milestonesConfig.holdoutPercent': 1,
           'milestonesConfig.items': 1,
@@ -99,7 +112,7 @@ export class EngagementAnalysisService {
     if (!eventIds.length) return { events: [], attendees: [] };
 
     // Por espectador (EventUser): solo sesiones que tocaron el vivo
-    const [rows, announcements, awardRows] = await Promise.all([
+    const [rows, announcements, awardRows, greetingRows] = await Promise.all([
       this.viewingSessionModel.aggregate<{
         _id: unknown;
         eventId: string;
@@ -133,6 +146,20 @@ export class EngagementAnalysisService {
           { _id: 0, eventId: 1, attendeeId: 1, privateSent: 1, holdout: 1 },
         )
         .lean(),
+      this.greetingModel
+        .find(
+          { eventId: { $in: eventIds } },
+          {
+            _id: 0,
+            eventId: 1,
+            kind: 1,
+            uid: 1,
+            attendeeId: 1,
+            hasButton: 1,
+            toUid: 1,
+          },
+        )
+        .lean(),
     ]);
     const annByEvent = new Map(announcements.map((a) => [a._id, a.n]));
 
@@ -151,6 +178,56 @@ export class EngagementAnalysisService {
         sent: prev.sent || !!a.privateSent,
         holdout: prev.holdout || !!a.holdout,
       });
+    }
+
+    // Saludos entre colegas: por asistente y evento, y totales por evento.
+    // Las devoluciones apuntan al UID de quien saludó: se traduce a asistente
+    // con los propios registros del evento.
+    const attendeeOfUid = new Map<string, string>();
+    for (const g of greetingRows) {
+      if (g.attendeeId) {
+        attendeeOfUid.set(`${g.eventId}:${g.uid}`, g.attendeeId);
+      }
+    }
+    const greetOf = new Map<string, GreetingVisit>();
+    const greetEntry = (eventId: string, attendeeId: string) => {
+      const k = `${eventId}:${attendeeId}`;
+      const g = greetOf.get(k) ?? [null, 0, 0, 0];
+      greetOf.set(k, g);
+      return g;
+    };
+    type GreetTotals = {
+      withButton: Set<string>;
+      noButton: Set<string>;
+      greets: number;
+      replies: number;
+    };
+    const greetByEvent = new Map<string, GreetTotals>();
+    for (const g of greetingRows) {
+      const ev: GreetTotals = greetByEvent.get(g.eventId) ?? {
+        withButton: new Set<string>(),
+        noButton: new Set<string>(),
+        greets: 0,
+        replies: 0,
+      };
+      greetByEvent.set(g.eventId, ev);
+      if (g.kind === 'greet') ev.greets++;
+      if (g.kind === 'reply') {
+        ev.replies++;
+        const to = g.toUid && attendeeOfUid.get(`${g.eventId}:${g.toUid}`);
+        if (to) greetEntry(g.eventId, to)[3]++;
+      }
+      const aid = g.attendeeId ?? attendeeOfUid.get(`${g.eventId}:${g.uid}`);
+      if (!aid) continue;
+      const entry = greetEntry(g.eventId, aid);
+      if (g.kind === 'impression') {
+        (g.hasButton ? ev.withButton : ev.noButton).add(aid);
+        entry[0] = g.hasButton || entry[0] === 1 ? 1 : 0;
+      } else if (g.kind === 'greet') {
+        entry[1]++;
+      } else if (g.kind === 'reply') {
+        entry[2]++;
+      }
     }
 
     // EventUser → asistente de la org
@@ -256,6 +333,15 @@ export class EngagementAnalysisService {
             awards: award?.n ?? 0,
             awardsShown: award?.shown ?? 0,
           },
+          greeting: {
+            enabled: !!e.herdConfig?.greeting?.enabled,
+            holdoutPercent: e.herdConfig?.greeting?.holdoutPercent ?? 0,
+            // Personas que vieron el anuncio individual con / sin botón
+            withButton: greetByEvent.get(id)?.withButton.size ?? 0,
+            noButton: greetByEvent.get(id)?.noButton.size ?? 0,
+            greets: greetByEvent.get(id)?.greets ?? 0,
+            replies: greetByEvent.get(id)?.replies ?? 0,
+          },
           liveViewers: minutesByEvent.get(id)?.length ?? 0,
           // Sin reproducción registrada: evento anterior al rastreo de playback
           hasPlayback: played.length > 0,
@@ -358,7 +444,8 @@ export class EngagementAnalysisService {
       ]),
     );
 
-    // visits: [índice del evento, minutos en vivo, hasta el final (1/0), estado]
+    // visits: [índice del evento, minutos en vivo, hasta el final (1/0),
+    // estado, saludo (GreetingVisit) o null si no hay registros de saludo]
     const outAttendees = [...visitsByAttendee.entries()].map(
       ([id, byEvent]) => ({
         id,
@@ -377,7 +464,8 @@ export class EngagementAnalysisService {
               round1(v.liveMin),
               untilEnd,
               exposure(v.eventId, id),
-            ] as [number, number, number, ExposureStatus];
+              greetOf.get(`${v.eventId}:${id}`) ?? null,
+            ] as [number, number, number, ExposureStatus, GreetingVisit | null];
           })
           .sort((a, b) => a[0] - b[0]),
       }),
