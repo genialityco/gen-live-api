@@ -24,7 +24,7 @@ import { ViewingSession } from './schemas/viewing-session.schema';
 import { EventUser } from './schemas/event-user.schema';
 import { OrgAttendee } from '../organizations/schemas/org-attendee.schema';
 import { RtdbService } from '../rtdb/rtdb.service';
-import { HerdService, HerdMember } from './herd.service';
+import { HERD_DEFAULT_STYLE, HerdService, HerdMember } from './herd.service';
 import { UpdateMilestonesConfigDto } from './dtos/update-milestones-config.dto';
 
 /** Textos por defecto de cada tipo de hito */
@@ -81,14 +81,22 @@ const PRESENCE_TYPES: MilestoneType[] = [
   'frequentAttendee',
 ];
 
+// Apariencia por defecto: la del evento isglt2-boehringer (acewebinarco). Sus
+// hitos se precargan en el panel (DEFAULT_MILESTONE_ITEMS del frontend)
 export const DEFAULT_MILESTONES_CONFIG = {
-  privateMessage: { position: 'top-center', durationSec: 8, label: '¡LOGRO!' },
+  privateMessage: {
+    position: 'top-center',
+    durationSec: 8,
+    label: '¡LOGRO!',
+    style: HERD_DEFAULT_STYLE,
+  },
   publicMessage: {
     position: 'top-center',
     durationSec: 7,
     label: 'FELICITACIONES',
     minIntervalSec: 30,
     maxNames: 3,
+    style: HERD_DEFAULT_STYLE,
   },
 } as const;
 

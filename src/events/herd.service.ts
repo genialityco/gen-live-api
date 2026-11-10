@@ -45,6 +45,18 @@ export const herdKey = (s: unknown) =>
     .replace(/[.#$/[\]]/g, '_')
     .slice(0, 100) || '_';
 
+/** Estilo por defecto de los mensajes de manada: tercio inferior claro */
+export const HERD_DEFAULT_STYLE = {
+  template: 'lowerThird',
+  mode: 'static',
+  size: 'sm',
+  animation: 'slide',
+  font: 'montserrat',
+  bgColor: 'rgba(255, 255, 255, 0.96)',
+  textColor: '#0f172a',
+  accentColor: '#2563eb',
+};
+
 export const DEFAULT_HERD_CONFIG: Required<
   Omit<
     EventHerdConfig,
@@ -60,9 +72,11 @@ export const DEFAULT_HERD_CONFIG: Required<
 > = {
   enabled: false,
   accentColor: '#3b82f6',
+  // Mensajes y saludo por defecto: los del evento isglt2-boehringer (acewebinarco)
   privateMessage: {
     enabled: true,
-    template: '¡Hola {nombre}! Contigo ya son {cantidad} {grupo} conectados',
+    template:
+      '¡Hola {nombre}! Contigo {está|están} conectados {inscritos} profesionales de {grupo_plural} apostándole a la excelencia médica',
     position: 'top-left',
     durationSec: 8,
     repeatEverySec: 0,
@@ -71,24 +85,27 @@ export const DEFAULT_HERD_CONFIG: Required<
     firstTemplate:
       '¡Hola {nombre}! Eres la {posicion} persona de {grupo_plural} en conectarse',
     ordinalGender: 'f',
+    style: { ...HERD_DEFAULT_STYLE },
   },
   publicMessage: {
     enabled: true,
-    template: '¡Ya son {cantidad} {grupo} conectados!',
+    template: '¡Se conectó un nuevo profesional de {grupo}!',
     position: 'bottom-left',
     durationSec: 6,
     announceOnGrowth: true,
     minIntervalSec: 20,
-    milestoneEvery: 1,
+    milestoneEvery: 10,
     repeatEverySec: 0,
     repeatTemplate: '',
+    label: 'Bienvenido',
+    style: { ...HERD_DEFAULT_STYLE },
   },
   greeting: {
-    enabled: false,
+    enabled: true,
     position: 'bottom-right',
     durationSec: 6,
     cooldownSec: 60,
-    holdoutPercent: 0,
+    holdoutPercent: 20,
   },
 };
 
