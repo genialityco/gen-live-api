@@ -257,8 +257,18 @@ export class Event {
     meta?: Record<string, any>;
   }>;
 
+  // Cuándo se marcó el evento como `ended` (puede ser horas después del vivo)
   @Prop({ type: Date })
   endedAt?: Date;
+
+  // Inicio y cierre reales de la transmisión en vivo: se escriben al entrar
+  // en `live` y al salir de él (a `ended` o a `replay`). Son la referencia
+  // para "se quedó hasta el final" y para medir el vivo.
+  @Prop({ type: Date })
+  liveStartedAt?: Date;
+
+  @Prop({ type: Date })
+  liveEndedAt?: Date;
 
   @Prop({
     enum: ['upcoming', 'live', 'ended', 'replay'],

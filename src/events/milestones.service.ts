@@ -26,6 +26,7 @@ import { OrgAttendee } from '../organizations/schemas/org-attendee.schema';
 import { RtdbService } from '../rtdb/rtdb.service';
 import { HERD_DEFAULT_STYLE, HerdService, HerdMember } from './herd.service';
 import { UpdateMilestonesConfigDto } from './dtos/update-milestones-config.dto';
+import { DEFAULT_HOLDOUT_PERCENT } from './experiment-defaults';
 
 /** Textos por defecto de cada tipo de hito */
 export const DEFAULT_MILESTONE_TEXTS: Record<
@@ -257,7 +258,7 @@ export class MilestonesService {
     }
     const milestonesConfig: EventMilestonesConfig = {
       enabled: dto.enabled,
-      holdoutPercent: dto.holdoutPercent ?? 0,
+      holdoutPercent: dto.holdoutPercent ?? DEFAULT_HOLDOUT_PERCENT,
       accentColor: dto.accentColor || undefined,
       privateMessage: {
         ...DEFAULT_MILESTONES_CONFIG.privateMessage,
