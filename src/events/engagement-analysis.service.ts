@@ -12,9 +12,15 @@ import { MilestoneAward } from './schemas/milestone-award.schema';
 import { HerdGreeting } from './schemas/herd-greeting.schema';
 import { OrgAttendee } from '../organizations/schemas/org-attendee.schema';
 import { HerdService } from './herd.service';
+import { milestoneHoldout } from './milestones.service';
 
-// Margen para contar que alguien "se quedó hasta el final" (igual que manada)
-const UNTIL_END_MARGIN_MS = 5 * 60_000;
+/** Brazo de un sorteo: 1 ve los mensajes · 0 control · null sin sorteo */
+type Arm = 1 | 0 | null;
+import { resolveLiveEnd, stayedUntilEnd } from './live-window';
+import {
+  DeliveryTotals,
+  MessageDeliveryService,
+} from './message-delivery.service';
 
 /** Tipo de evento según las funciones de retención que tuvo */
 export type EngagementKind = 'base' | 'herd' | 'milestones' | 'both';
@@ -84,6 +90,7 @@ export class EngagementAnalysisService {
     @InjectModel(HerdGreeting.name)
     private greetingModel: Model<HerdGreeting>,
     private herd: HerdService,
+    private deliveries: MessageDeliveryService,
   ) {}
 
   async forOrg(orgId: string) {
@@ -96,6 +103,8 @@ export class EngagementAnalysisService {
           status: 1,
           schedule: 1,
           endedAt: 1,
+          liveStartedAt: 1,
+          liveEndedAt: 1,
           hidden: 1,
           createdAt: 1,
           'herdConfig.enabled': 1,
@@ -112,7 +121,14 @@ export class EngagementAnalysisService {
     if (!eventIds.length) return { events: [], attendees: [] };
 
     // Por espectador (EventUser): solo sesiones que tocaron el vivo
-    const [rows, announcements, awardRows, greetingRows] = await Promise.all([
+    const [
+      rows,
+      announcements,
+      awardRows,
+      greetingRows,
+      deliveredByEvent,
+      privateShown,
+    ] = await Promise.all([
       this.viewingSessionModel.aggregate<{
         _id: unknown;
         eventId: string;
@@ -160,6 +176,9 @@ export class EngagementAnalysisService {
           },
         )
         .lean(),
+      // Mensajes que efectivamente se mostraron (registro desde nov-2026)
+      this.deliveries.totalsByEvent(eventIds),
+      this.deliveries.privateByAttendee(eventIds),
     ]);
     const annByEvent = new Map(announcements.map((a) => [a._id, a.n]));
 
@@ -272,11 +291,15 @@ export class EngagementAnalysisService {
       }
     }
     const minutesByEvent = new Map<string, number[]>();
+    const lastSeensByEvent = new Map<string, number[]>();
     for (const byEvent of visitsByAttendee.values()) {
       for (const v of byEvent.values()) {
         const list = minutesByEvent.get(v.eventId) ?? [];
         list.push(v.liveMin);
         minutesByEvent.set(v.eventId, list);
+        const seen = lastSeensByEvent.get(v.eventId) ?? [];
+        seen.push(v.lastSeen);
+        lastSeensByEvent.set(v.eventId, seen);
       }
     }
 
@@ -310,6 +333,12 @@ export class EngagementAnalysisService {
           (e.schedule?.startsAt
             ? new Date(e.schedule.startsAt).getTime()
             : new Date((e as any).createdAt ?? Date.now()).getTime());
+        const liveEnd = resolveLiveEnd(e, lastSeensByEvent.get(id) ?? []);
+        const liveStart = e.liveStartedAt
+          ? new Date(e.liveStartedAt).getTime()
+          : null;
+        const delivered: DeliveryTotals | null =
+          deliveredByEvent.get(id) ?? null;
         return {
           id,
           title: e.title,
@@ -317,7 +346,19 @@ export class EngagementAnalysisService {
           status: e.status,
           hidden: !!e.hidden,
           date: new Date(date).toISOString(),
-          endedAt: e.endedAt ? new Date(e.endedAt).toISOString() : null,
+          // Cierre del vivo usado para "hasta el final" (ver resolveLiveEnd)
+          endedAt:
+            liveEnd.at !== null ? new Date(liveEnd.at).toISOString() : null,
+          liveEndSource: liveEnd.source,
+          liveStartedAt: liveStart ? new Date(liveStart).toISOString() : null,
+          // Duración real del vivo (solo con inicio y cierre registrados)
+          liveDurationMin:
+            liveStart && liveEnd.source === 'recorded' && liveEnd.at
+              ? round1((liveEnd.at - liveStart) / 60_000)
+              : null,
+          // Mensajes que se mostraron según el registro de entregas; null si el
+          // evento no tiene registro (anterior a nov-2026 o sin funciones)
+          delivered,
           kind,
           herd: {
             enabled: !!e.herdConfig?.enabled,
@@ -358,6 +399,9 @@ export class EngagementAnalysisService {
         e.id,
         e.endedAt ? new Date(e.endedAt).getTime() : null,
       ]),
+    );
+    const hasDeliveries = new Set(
+      outEvents.filter((e) => e.delivered).map((e) => e.id),
     );
 
     const attendeeIds = [...visitsByAttendee.keys()].filter((id) =>
@@ -431,6 +475,33 @@ export class EngagementAnalysisService {
       return 'N';
     };
 
+    // Sorteo de cada función por separado (1 ve los mensajes · 0 control ·
+    // null sin sorteo). Los dos sorteos son independientes, así que se puede
+    // cruzar 2×2 y separar el efecto de los anuncios del de los logros.
+    const herdArm = (eventId: string, attendeeId: string): Arm => {
+      const h = herdOf.get(eventId);
+      if (!h?.holdout) return null;
+      const gs = h.groups.get(attendeeId) ?? [];
+      if (!gs.length || gs.every((g) => h.excluded.has(g.key))) return null;
+      const arm = h.arms.get(attendeeId);
+      return arm === 'c' ? 0 : arm === 't' ? 1 : null;
+    };
+    const milestoneHoldoutOf = new Map(
+      outEvents.map((e) => [
+        e.id,
+        e.kind === 'milestones' || e.kind === 'both'
+          ? e.milestones.holdoutPercent
+          : 0,
+      ]),
+    );
+    // El sorteo de logros es determinista por asistente: vale también para
+    // quien no llegó a ningún hito (comparación por intención de tratar)
+    const milestoneArm = (eventId: string, attendeeId: string): Arm => {
+      const pct = milestoneHoldoutOf.get(eventId) ?? 0;
+      if (pct <= 0) return null;
+      return milestoneHoldout(eventId, attendeeId, pct) ? 0 : 1;
+    };
+
     // Nombres y correos de los asistentes
     const docs = attendeeIds.length
       ? await this.orgAttendeeModel
@@ -445,7 +516,9 @@ export class EngagementAnalysisService {
     );
 
     // visits: [índice del evento, minutos en vivo, hasta el final (1/0),
-    // estado, saludo (GreetingVisit) o null si no hay registros de saludo]
+    // estado, saludo (GreetingVisit) o null si no hay registros de saludo,
+    // mensajes personales mostrados (null si el evento no tiene registro),
+    // sorteo de anuncios y sorteo de logros (1 · 0 control · null)]
     const outAttendees = [...visitsByAttendee.entries()].map(
       ([id, byEvent]) => ({
         id,
@@ -456,16 +529,29 @@ export class EngagementAnalysisService {
         visits: [...byEvent.values()]
           .filter((v) => eventIndex.has(v.eventId))
           .map((v) => {
-            const endedAt = endedAtOf.get(v.eventId);
-            const untilEnd =
-              endedAt && v.lastSeen >= endedAt - UNTIL_END_MARGIN_MS ? 1 : 0;
+            const endedAt = endedAtOf.get(v.eventId) ?? null;
+            const untilEnd = stayedUntilEnd(v.lastSeen, endedAt) ? 1 : 0;
             return [
               eventIndex.get(v.eventId)!,
               round1(v.liveMin),
               untilEnd,
               exposure(v.eventId, id),
               greetOf.get(`${v.eventId}:${id}`) ?? null,
-            ] as [number, number, number, ExposureStatus, GreetingVisit | null];
+              hasDeliveries.has(v.eventId)
+                ? (privateShown.get(`${v.eventId}:${id}`) ?? 0)
+                : null,
+              herdArm(v.eventId, id),
+              milestoneArm(v.eventId, id),
+            ] as [
+              number,
+              number,
+              number,
+              ExposureStatus,
+              GreetingVisit | null,
+              number | null,
+              Arm,
+              Arm,
+            ];
           })
           .sort((a, b) => a[0] - b[0]),
       }),

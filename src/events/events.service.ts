@@ -42,6 +42,7 @@ import { EmailSendService } from '../event-email/email-send.service';
 import { EventEmailTemplateService } from '../event-email/event-email-template.service';
 import { EmailCampaignService } from '../email-campaign/email-campaign.service';
 import { CertificatesService } from '../certificates/certificates.service';
+import { liveWindowUpdate } from './live-window';
 
 function normalizeByType(value: any, type: FormFieldType | undefined) {
   if (value === null || value === undefined) return value;
@@ -597,8 +598,16 @@ export class EventsService implements OnModuleInit {
     eventId: string,
     status: 'upcoming' | 'live' | 'ended' | 'replay',
   ) {
+    const prev = await this.model
+      .findById(eventId, { status: 1, liveStartedAt: 1 })
+      .lean();
+    if (!prev) throw new NotFoundException('Event not found');
     const ev = await this.model
-      .findByIdAndUpdate(eventId, { status }, { new: true })
+      .findByIdAndUpdate(
+        eventId,
+        { status, ...liveWindowUpdate(prev, status, new Date()) },
+        { new: true },
+      )
       .lean();
     if (!ev) throw new NotFoundException('Event not found');
     await this.rtdb.setStatus(eventId, status);

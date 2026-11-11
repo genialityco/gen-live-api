@@ -25,6 +25,9 @@ import { HerdAnnouncement } from './schemas/herd-announcement.schema';
 import { RtdbService } from '../rtdb/rtdb.service';
 import { UpdateHerdConfigDto } from './dtos/update-herd-config.dto';
 import { herdGroupName } from './herd-grammar';
+import { resolveLiveEnd, stayedUntilEnd } from './live-window';
+import { MessageDeliveryService } from './message-delivery.service';
+import { DEFAULT_HOLDOUT_PERCENT } from './experiment-defaults';
 
 /**
  * Normaliza un valor del formulario para comparar sin tildes/mayúsculas.
@@ -195,9 +198,6 @@ export function herdDims(
 /** Brazo del experimento: t = ve los mensajes, c = grupo de control */
 type Arm = 't' | 'c';
 
-// Quien sigue conectado hasta 5 min antes del fin cuenta como "se quedó hasta el final"
-const UNTIL_END_MARGIN_MS = 5 * 60_000;
-
 /** Contexto por evento: config + resolución valor → grupo, con caché */
 type HerdContext = {
   config: EventHerdConfig;
@@ -286,6 +286,7 @@ export class HerdService {
     private viewingSessionModel?: Model<ViewingSession>,
     @InjectModel(HerdAnnouncement.name)
     private announcementModel?: Model<HerdAnnouncement>,
+    private deliveries?: MessageDeliveryService,
   ) {}
 
   // ── Configuración ────────────────────────────────────────────────────────
@@ -312,7 +313,7 @@ export class HerdService {
           labelPattern: h.labelPattern?.trim() || undefined,
           singularPattern: h.singularPattern?.trim() || undefined,
         })),
-      holdoutPercent: dto.holdoutPercent ?? 0,
+      holdoutPercent: dto.holdoutPercent ?? DEFAULT_HOLDOUT_PERCENT,
       formalTitle:
         dto.formalTitle?.fieldId && dto.formalTitle.values?.length
           ? {
@@ -1189,7 +1190,7 @@ export class HerdService {
     const ctx = await this.getContext(eventId, true);
     if (!ctx) throw new NotFoundException('Event not found');
     const event = await this.eventModel
-      .findById(eventId, { endedAt: 1 })
+      .findById(eventId, { status: 1, endedAt: 1, liveEndedAt: 1 })
       .lean();
     const arms = await this.loadArms(eventId);
     const attendeeIds = [...arms.keys()];
@@ -1232,12 +1233,24 @@ export class HerdService {
       if (aid) viewing.set(aid, r);
     }
 
-    const endedAt = event?.endedAt ? new Date(event.endedAt).getTime() : null;
+    // Cierre real del vivo (no la hora en que se marcó como terminado)
+    const liveEnd = resolveLiveEnd(
+      event ?? {},
+      rows
+        .filter((r) => r.wasLive && r.lastSeen)
+        .map((r) => new Date(r.lastSeen).getTime()),
+    );
+    const endedAt = liveEnd.at;
+    // Mensajes que efectivamente se le mostraron a cada asistente
+    const shownAt = this.deliveries
+      ? await this.deliveries.firstShownByAttendee(eventId)
+      : new Map<string, number>();
     type Viewer = {
       playbackMin: number;
       presenceMin: number;
       sessions: number;
       untilEnd: boolean;
+      shown: boolean;
     };
     const buckets: Record<'treatment' | 'control' | 'excluded', Viewer[]> = {
       treatment: [],
@@ -1264,9 +1277,9 @@ export class HerdService {
         presenceMin: (v?.presence ?? 0) / 60,
         sessions: v?.sessions ?? 0,
         untilEnd:
-          !!endedAt &&
           !!v?.lastSeen &&
-          new Date(v.lastSeen).getTime() >= endedAt - UNTIL_END_MARGIN_MS,
+          stayedUntilEnd(new Date(v.lastSeen).getTime(), endedAt),
+        shown: shownAt.has(aid),
       });
     }
 
@@ -1285,6 +1298,8 @@ export class HerdService {
         watched30Pct: pct((v) => v.playbackMin >= 30),
         watched60Pct: pct((v) => v.playbackMin >= 60),
         untilEndPct: endedAt ? pct((v) => v.untilEnd) : null,
+        // % al que se le mostró algún mensaje (null sin registro de entregas)
+        shownPct: shownAt.size ? pct((v) => v.shown) : null,
       };
     };
 
@@ -1319,6 +1334,10 @@ export class HerdService {
     return {
       holdoutPercent: ctx.holdoutPercent,
       eventEnded: !!endedAt,
+      // recorded = cierre registrado · status = marcado como terminado ·
+      // estimated = salida masiva de la audiencia (eventos anteriores)
+      liveEndedAt: endedAt ? new Date(endedAt).toISOString() : null,
+      liveEndSource: liveEnd.source,
       // Sorteados que nunca estuvieron en vivo: fuera de la comparación
       notLive,
       treatment: summarize(buckets.treatment),

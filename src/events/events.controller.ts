@@ -36,6 +36,8 @@ import { HerdService } from './herd.service';
 import { NetworkReportsService } from './network-reports.service';
 import { HerdGreetingService } from './herd-greeting.service';
 import { HerdGreetingActionDto } from './dtos/herd-greeting-action.dto';
+import { RecordDeliveryDto } from './dtos/record-delivery.dto';
+import { MessageDeliveryService } from './message-delivery.service';
 import { MilestonesService } from './milestones.service';
 import { EngagementAnalysisService } from './engagement-analysis.service';
 import {
@@ -64,6 +66,7 @@ export class EventsController {
     private herdGreetings: HerdGreetingService,
     private milestones: MilestonesService,
     private engagement: EngagementAnalysisService,
+    private deliveries: MessageDeliveryService,
   ) {}
 
   // ENDPOINTS PÚBLICOS (sin autenticación)
@@ -342,6 +345,18 @@ export class EventsController {
     @Req() req: any,
   ) {
     return await this.herdGreetings.act(eventId, String(req.user.uid), dto);
+  }
+
+  // El asistente avisa que se le mostró un mensaje (anuncio, logro o saludo):
+  // registro de entregas para medir los experimentos
+  @Post(':eventId/deliveries')
+  @UseGuards(FirebaseAuthGuard)
+  async recordDelivery(
+    @Param('eventId') eventId: string,
+    @Body() dto: RecordDeliveryDto,
+    @Req() req: any,
+  ) {
+    return await this.deliveries.record(eventId, String(req.user.uid), dto);
   }
 
   // Métricas del saludo entre colegas (dueñ@ del evento)
