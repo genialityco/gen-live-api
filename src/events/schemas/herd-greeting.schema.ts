@@ -38,6 +38,11 @@ export class HerdGreeting {
   @Prop()
   hasButton?: boolean;
 
+  // impression: ¿el botón se mostró? (con pocos colegas conectados se oculta
+  // aunque su brazo lo tenga). Ausente en registros anteriores = hasButton
+  @Prop()
+  buttonShown?: boolean;
+
   // greet: conectados del grupo que lo recibieron (sin contar a quien saluda)
   @Prop()
   recipients?: number;

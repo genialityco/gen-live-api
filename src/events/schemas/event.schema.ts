@@ -148,6 +148,9 @@ export interface EventHerdConfig {
     position?: string; // dónde aparece el saludo recibido (posiciones de manada)
     durationSec?: number;
     cooldownSec?: number; // espera mínima entre saludos de una misma persona
+    // Conectados del grupo (contando a quien saluda) para mostrar el botón:
+    // saludar a nadie no genera respuesta
+    minConnected?: number;
     // % de asistentes (con mensajes) que al azar no ven el botón: compara su
     // permanencia contra quienes sí lo ven (0 = sin experimento)
     holdoutPercent?: number;

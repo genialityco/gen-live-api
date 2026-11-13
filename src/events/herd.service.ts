@@ -9,7 +9,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import * as admin from 'firebase-admin';
 import {
   Event,
@@ -28,6 +28,14 @@ import { herdGroupName } from './herd-grammar';
 import { resolveLiveEnd, stayedUntilEnd } from './live-window';
 import { MessageDeliveryService } from './message-delivery.service';
 import { DEFAULT_HOLDOUT_PERCENT } from './experiment-defaults';
+import {
+  isConditional,
+  isFieldEffectivelyVisible,
+  VisibilityField,
+} from './form-visibility';
+
+/** Por qué un asistente tiene o no grupo (ver classifyAttendees) */
+export type GroupStatus = 'grouped' | 'excluded' | 'missing' | 'notApplicable';
 
 /**
  * Normaliza un valor del formulario para comparar sin tildes/mayúsculas.
@@ -108,6 +116,7 @@ export const DEFAULT_HERD_CONFIG: Required<
     position: 'bottom-right',
     durationSec: 6,
     cooldownSec: 60,
+    minConnected: 3,
     holdoutPercent: 20,
   },
 };
@@ -1064,6 +1073,142 @@ export class HerdService {
   ): Promise<Map<string, Group[]>> {
     const found = await this.readAttendees(ctx, attendeeIds);
     return new Map([...found].map(([id, f]) => [id, f.groups]));
+  }
+
+  // ── Cobertura: quién tiene grupo y por qué no ────────────────────────────
+
+  /**
+   * Por qué cada asistente tiene o no grupo de manada:
+   * - grouped: tiene al menos un grupo que recibe mensajes
+   * - excluded: tiene grupo, pero todos sus grupos están excluidos
+   * - missing: el campo principal se le mostraba y lo dejó vacío
+   * - notApplicable: el campo principal no se le mostraba (oculto por su
+   *   preselección en el formulario): no tener grupo es lo esperado
+   * `offOptions`: con grupo, pero respondió algo fuera de las opciones del
+   * campo (texto libre o valor viejo): forma un grupo propio, casi siempre chico.
+   * null si el evento no tiene manadas configuradas.
+   */
+  async classifyAttendees(eventId: string, attendeeIds: string[]) {
+    const ctx = await this.getContext(eventId);
+    if (!ctx?.fieldId) return null;
+    const fields = (await this.getFields(eventId)) as Array<
+      VisibilityField & {
+        label?: string;
+        type?: string;
+        required?: boolean;
+        options?: Array<{ value: string; label?: string }>;
+      }
+    >;
+    const main = fields.find((f) => f?.id === ctx.fieldId);
+    if (!main) return null;
+    const optionNorms = new Set<string>();
+    for (const o of main.options ?? []) {
+      optionNorms.add(norm(o.value));
+      optionNorms.add(norm(o.label ?? o.value));
+    }
+
+    const status = new Map<string, GroupStatus>();
+    const offOptions = new Set<string>();
+    const ids = attendeeIds.filter((id) => Types.ObjectId.isValid(id));
+    for (let i = 0; i < ids.length; i += 1000) {
+      const docs = await this.orgAttendeeModel
+        .find({ _id: { $in: ids.slice(i, i + 1000) } }, { registrationData: 1 })
+        .lean();
+      for (const d of docs as any[]) {
+        const id = String(d._id);
+        const data = (d.registrationData ?? {}) as Record<string, unknown>;
+        const groups = ctx.groupsOf(data);
+        if (groups.some((g) => !ctx.excludedKeys.has(g.key))) {
+          status.set(id, 'grouped');
+          const raw = data[main.id];
+          const v = Array.isArray(raw) ? raw[0] : raw;
+          if (
+            optionNorms.size &&
+            v != null &&
+            String(v as string).trim() &&
+            !optionNorms.has(norm(v))
+          ) {
+            offOptions.add(id);
+          }
+        } else if (groups.length) {
+          status.set(id, 'excluded');
+        } else {
+          status.set(
+            id,
+            isFieldEffectivelyVisible(main, data, fields)
+              ? 'missing'
+              : 'notApplicable',
+          );
+        }
+      }
+    }
+    return {
+      status,
+      offOptions,
+      field: {
+        id: main.id,
+        label: main.label ?? main.id,
+        type: main.type ?? 'text',
+        required: !!main.required,
+        conditional: isConditional(main),
+        hasOptions: optionNorms.size > 0,
+      },
+    };
+  }
+
+  /**
+   * Cobertura de los grupos de manada en el evento: inscritos y espectadores
+   * en vivo según si tienen grupo y, si no, por qué. Para el panel de
+   * anuncios (decidir si conviene hacer obligatorio el campo).
+   */
+  async getGroupCoverage(eventId: string) {
+    const eventUsers = await this.eventUserModel
+      .find(
+        { eventId, status: { $ne: 'cancelled' } },
+        { _id: 1, attendeeId: 1 },
+      )
+      .lean();
+    const attendeeOfEu = new Map(
+      eventUsers.map((eu) => [String(eu._id), String(eu.attendeeId)]),
+    );
+    const registered = [...new Set(attendeeOfEu.values())];
+    const liveEus: unknown[] = this.viewingSessionModel
+      ? await this.viewingSessionModel.distinct('eventUserId', {
+          eventId,
+          wasLiveDuringSession: true,
+        })
+      : [];
+    const live = new Set(
+      liveEus
+        .map((eu) => attendeeOfEu.get(String(eu)))
+        .filter((a): a is string => !!a),
+    );
+
+    const result = await this.classifyAttendees(eventId, registered);
+    if (!result) return null;
+    const summarize = (ids: Iterable<string>) => {
+      const out = {
+        total: 0,
+        grouped: 0,
+        excluded: 0,
+        missing: 0,
+        notApplicable: 0,
+        offOptions: 0,
+      };
+      for (const id of ids) {
+        const s = result.status.get(id);
+        if (!s) continue;
+        out.total++;
+        out[s]++;
+        if (result.offOptions.has(id)) out.offOptions++;
+      }
+      return out;
+    };
+    return {
+      field: result.field,
+      registered: summarize(registered),
+      live: live.size ? summarize(live) : null,
+    };
   }
 
   /** Grupos y tratamiento formal de cada asistente según su registro */

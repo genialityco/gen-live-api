@@ -11,7 +11,7 @@ import { HerdAnnouncement } from './schemas/herd-announcement.schema';
 import { MilestoneAward } from './schemas/milestone-award.schema';
 import { HerdGreeting } from './schemas/herd-greeting.schema';
 import { OrgAttendee } from '../organizations/schemas/org-attendee.schema';
-import { HerdService } from './herd.service';
+import { GroupStatus, HerdService } from './herd.service';
 import { milestoneHoldout } from './milestones.service';
 
 /** Brazo de un sorteo: 1 ve los mensajes · 0 control · null sin sorteo */
@@ -444,6 +444,8 @@ export class EngagementAnalysisService {
     // evento con manada más reciente. Sale del registro en la org, así que
     // vale también para sus eventos sin manada.
     const groupOf = new Map<string, { key: string; label: string }>();
+    // Por qué tiene o no grupo, con el mismo evento de referencia
+    let groupStatusOf = new Map<string, GroupStatus>();
     for (const e of [...herdEvents].reverse()) {
       try {
         const ctx = await this.herd.contextFor(e.id);
@@ -453,6 +455,9 @@ export class EngagementAnalysisService {
         for (const [id, gs] of groups) {
           if (gs[0]) groupOf.set(id, { key: gs[0].key, label: gs[0].label });
         }
+        groupStatusOf =
+          (await this.herd.classifyAttendees(e.id, attendeeIds))?.status ??
+          groupStatusOf;
         break;
       } catch {
         // probar con el evento anterior
@@ -526,6 +531,9 @@ export class EngagementAnalysisService {
         email: info.get(id)?.email ?? '',
         groupKey: groupOf.get(id)?.key ?? null,
         group: groupOf.get(id)?.label ?? null,
+        // grouped · excluded · missing (no respondió) · notApplicable (el
+        // campo no se le mostraba) · null sin manada de referencia
+        groupStatus: groupStatusOf.get(id) ?? null,
         visits: [...byEvent.values()]
           .filter((v) => eventIndex.has(v.eventId))
           .map((v) => {

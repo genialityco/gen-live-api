@@ -231,6 +231,13 @@ class HerdGreetingDto {
   @Max(3600)
   cooldownSec?: number;
 
+  // Conectados del grupo (con quien saluda) para mostrar el botón
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  minConnected?: number;
+
   // % al azar sin botón (experimento del saludo)
   @IsOptional()
   @IsInt()

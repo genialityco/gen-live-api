@@ -33,7 +33,8 @@ export class OrganizationsService {
   constructor(
     @InjectModel(Organization.name) private model: Model<OrganizationDocument>,
     @InjectModel(OrgAttendee.name) private attendeeModel: Model<OrgAttendee>,
-    @Inject(forwardRef(() => EventsService)) private eventsService: EventsService,
+    @Inject(forwardRef(() => EventsService))
+    private eventsService: EventsService,
   ) {}
 
   async create(
@@ -56,14 +57,14 @@ export class OrganizationsService {
       .sort({ createdAt: -1 })
       .lean();
 
-    const orgIds = orgs.map((o) => o._id as Types.ObjectId);
+    const orgIds = orgs.map((o) => o._id);
     const nextMap = await this.eventsService.nextUpcomingByOrgIds(orgIds);
 
     return orgs.map(
       (o) =>
         ({
           ...o,
-          nextEvent: nextMap[(o._id as Types.ObjectId).toString()] ?? null,
+          nextEvent: nextMap[o._id.toString()] ?? null,
         }) as unknown as OrgWithNextEvent,
     );
   }
@@ -179,6 +180,19 @@ export class OrganizationsService {
         { new: true, runValidators: true },
       )
       .lean();
+  }
+
+  /** Cambia solo `required` de un campo del formulario (false si no existe) */
+  async setRegistrationFieldRequired(
+    orgId: string,
+    fieldId: string,
+    required: boolean,
+  ) {
+    const res = await this.model.updateOne(
+      { _id: orgId, 'registrationForm.fields.id': fieldId },
+      { $set: { 'registrationForm.fields.$.required': required } },
+    );
+    return res.matchedCount > 0;
   }
 
   // =============== ACTUALIZAR ORGANIZACIÓN ===============

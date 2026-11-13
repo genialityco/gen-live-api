@@ -176,6 +176,7 @@ export class HerdGreetingService {
       group,
       dto,
       cfg.greeting.cooldownSec ?? 60,
+      cfg.greeting.minConnected ?? 1,
     );
   }
 
@@ -196,6 +197,8 @@ export class HerdGreetingService {
       groupLabel: group.label,
       source: dto.source,
       hasButton: !!member.greet,
+      // Sin el dato (clientes anteriores) se asume que se mostró si lo tenía
+      buttonShown: !!member.greet && dto.buttonShown !== false,
     });
     return { ok: true, hasButton: !!member.greet };
   }
@@ -207,6 +210,7 @@ export class HerdGreetingService {
     group: MemberGroup,
     dto: HerdGreetingActionDto,
     cooldownSec: number,
+    minConnected: number,
   ) {
     if (!member.greet) {
       throw new ForbiddenException(
@@ -240,7 +244,17 @@ export class HerdGreetingService {
     const live = await this.rtdb
       .ref(`/herd/${eventId}/live/counts/${group.key}`)
       .once('value');
-    const recipients = Math.max(0, Number(live.val() ?? 0) - 1);
+    const connected = Number(live.val() ?? 0);
+    const recipients = Math.max(0, connected - 1);
+    // Con pocos colegas conectados la página no muestra el botón; si llega
+    // igual (la cuenta cambió), no se envía un saludo que nadie verá
+    if (connected < minConnected) {
+      throw new BadRequestException({
+        message: 'Aún hay pocos colegas conectados',
+        connected,
+        minConnected,
+      });
+    }
 
     const ref = this.rtdb.ref(`/herd/${eventId}/greetings/${group.key}`).push();
     await ref.set({
@@ -273,13 +287,10 @@ export class HerdGreetingService {
     dto: HerdGreetingActionDto,
   ) {
     if (!dto.greetingId) throw new BadRequestException('greetingId requerido');
-    // Quien quedó sin botón (experimento) tampoco puede devolver: así su
-    // brazo no tiene ninguna interacción del saludo
-    if (!member.greet) {
-      throw new ForbiddenException(
-        'Este asistente no tiene el botón de saludo',
-      );
-    }
+    // Cualquiera del grupo puede devolver, tenga o no el botón para iniciar:
+    // el experimento del saludo mide el botón «Saludar», y sin devoluciones
+    // el saludo no genera ninguna conversación (quien está en el control de
+    // la manada no llega aquí: está silenciado)
     const original = await this.greetingModel
       .findOne({ eventId, kind: 'greet', greetingId: dto.greetingId })
       .lean();
@@ -336,6 +347,7 @@ export class HerdGreetingService {
           groupKey: 1,
           groupLabel: 1,
           hasButton: 1,
+          buttonShown: 1,
           recipients: 1,
           greetingId: 1,
           source: 1,
@@ -348,8 +360,12 @@ export class HerdGreetingService {
     const replies = docs.filter((d) => d.kind === 'reply');
     const uniq = <T>(xs: T[]) => new Set(xs).size;
 
+    // Botón realmente en pantalla (los registros anteriores no tienen el
+    // dato: entonces se mostraba siempre que el brazo lo tenía)
+    const sawButton = (d: (typeof impressions)[number]) =>
+      d.buttonShown ?? !!d.hasButton;
     const shownWithButton = new Set(
-      impressions.filter((d) => d.hasButton).map((d) => d.uid),
+      impressions.filter(sawButton).map((d) => d.uid),
     );
     const senders = new Set(greets.map((d) => d.uid));
     const repliedGreetings = new Set(replies.map((d) => d.greetingId));
@@ -383,7 +399,7 @@ export class HerdGreetingService {
       return row;
     };
     for (const d of impressions)
-      if (d.hasButton) g(d.groupKey, d.groupLabel).shown.add(d.uid);
+      if (sawButton(d)) g(d.groupKey, d.groupLabel).shown.add(d.uid);
     for (const d of greets) {
       const row = g(d.groupKey, d.groupLabel);
       row.senders.add(d.uid);
@@ -394,7 +410,7 @@ export class HerdGreetingService {
 
     const bySource: Record<string, { shown: number; greets: number }> = {};
     for (const d of impressions)
-      if (d.hasButton) {
+      if (sawButton(d)) {
         const s = (bySource[d.source ?? 'welcome'] ??= { shown: 0, greets: 0 });
         s.shown++;
       }

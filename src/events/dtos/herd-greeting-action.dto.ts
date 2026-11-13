@@ -1,4 +1,10 @@
-import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsIn,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
 
 /**
  * Acción del asistente sobre el saludo entre colegas:
@@ -26,6 +32,12 @@ export class HerdGreetingActionDto {
   @IsString()
   @MaxLength(200)
   groupKey?: string;
+
+  // impression: ¿el botón se mostró de verdad? Su brazo puede tenerlo, pero
+  // se oculta si hay pocos colegas conectados
+  @IsOptional()
+  @IsBoolean()
+  buttonShown?: boolean;
 
   // Nombre que muestra la página (respaldo si no se encuentra su registro)
   @IsOptional()

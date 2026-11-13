@@ -23,6 +23,7 @@ import { CreateOrganizationDto } from './dtos/create-organization.dto';
 import { CreateOrgAttendeeDto } from './dtos/create-org-attendee.dto';
 import { UpdateBrandingDto } from './dtos/update-branding.dto';
 import { UpdateRegistrationFormDto } from './dtos/update-registration-form.dto';
+import { SetFieldRequiredDto } from './dtos/set-field-required.dto';
 import { UpdateOrganizationDto } from './dtos/update-organization.dto';
 import { StorageService } from './storage.service';
 
@@ -286,6 +287,30 @@ export class OrganizationsController {
       throw new ForbiddenException('Not owner');
 
     return this.svc.updateRegistrationForm(org._id.toString(), dto);
+  }
+
+  // Marca o desmarca un campo como obligatorio sin reenviar todo el formulario
+  // (lo usa el panel de anuncios de manada). Igual que en el formulario, solo
+  // se exige a quien ve el campo según su lógica condicional.
+  @Patch('slug/:slug/registration-form/fields/:fieldId/required')
+  @UseGuards(FirebaseAuthGuard)
+  async setFieldRequired(
+    @Param('slug') slug: string,
+    @Param('fieldId') fieldId: string,
+    @Body() dto: SetFieldRequiredDto,
+    @Req() req: any,
+  ) {
+    const org = await this.svc.findBySlug(slug);
+    if (!org) throw new NotFoundException('Organization not found');
+    if (org.ownerUid !== req.user?.uid)
+      throw new ForbiddenException('Not owner');
+    const ok = await this.svc.setRegistrationFieldRequired(
+      org._id.toString(),
+      fieldId,
+      dto.required,
+    );
+    if (!ok) throw new NotFoundException('Field not found');
+    return { ok: true, fieldId, required: dto.required };
   }
 
   @Get('slug/:slug/registration-form')

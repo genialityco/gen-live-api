@@ -335,6 +335,13 @@ export class EventsController {
     return await this.herd.getExperimentReport(eventId);
   }
 
+  // Cobertura de los grupos de manada: quién tiene grupo y por qué no (dueñ@ del evento)
+  @Get(':eventId/herd/coverage')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async herdCoverage(@Param('eventId') eventId: string) {
+    return await this.herd.getGroupCoverage(eventId);
+  }
+
   // Saludo entre colegas: el asistente registra que vio su anuncio, saluda a
   // su grupo o devuelve un saludo (ver HerdGreetingService)
   @Post(':eventId/herd/greetings')
