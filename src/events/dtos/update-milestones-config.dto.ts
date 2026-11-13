@@ -125,6 +125,11 @@ export class UpdateMilestonesConfigDto {
   @MaxLength(40)
   accentColor?: string;
 
+  // Pestaña «Mis logros» en la página del asistente
+  @IsOptional()
+  @IsBoolean()
+  showToAttendee?: boolean;
+
   @IsOptional()
   @ValidateNested()
   @Type(() => MilestoneChannelDto)

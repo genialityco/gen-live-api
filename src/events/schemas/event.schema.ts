@@ -188,6 +188,8 @@ export interface EventMilestonesConfig {
   // % de asistentes que, al azar, no reciben felicitaciones (para medir)
   holdoutPercent?: number;
   accentColor?: string;
+  // El asistente ve la lista de hitos y su avance («Mis logros») junto al chat
+  showToAttendee?: boolean;
   privateMessage?: Pick<
     HerdMessageConfig,
     'position' | 'durationSec' | 'label' | 'style'

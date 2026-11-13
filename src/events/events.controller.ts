@@ -397,6 +397,13 @@ export class EventsController {
     );
   }
 
+  // «Mis logros»: hitos del evento con el avance del asistente de la sesión
+  @Get(':eventId/milestones/mine')
+  @UseGuards(FirebaseAuthGuard)
+  async myMilestones(@Param('eventId') eventId: string, @Req() req: any) {
+    return await this.milestones.mine(eventId, String(req.user.uid));
+  }
+
   // Logros otorgados por hito y los más recientes (dueñ@ del evento)
   @Get(':eventId/milestones/report')
   @UseGuards(FirebaseAuthGuard, EventOwnerGuard)

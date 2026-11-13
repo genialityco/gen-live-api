@@ -260,6 +260,7 @@ export class MilestonesService {
       enabled: dto.enabled,
       holdoutPercent: dto.holdoutPercent ?? DEFAULT_HOLDOUT_PERCENT,
       accentColor: dto.accentColor || undefined,
+      showToAttendee: !!dto.showToAttendee,
       privateMessage: {
         ...DEFAULT_MILESTONES_CONFIG.privateMessage,
         ...(dto.privateMessage ?? {}),
@@ -290,6 +291,7 @@ export class MilestonesService {
         JSON.stringify({
           enabled: cfg.enabled && cfg.items.some((i) => i.enabled !== false),
           accentColor: cfg.accentColor,
+          showToAttendee: !!cfg.showToAttendee,
           privateMessage: cfg.privateMessage,
           publicMessage: cfg.publicMessage,
           updatedAt: Date.now(),
@@ -887,6 +889,161 @@ export class MilestonesService {
       },
       { $set: { publicAt: new Date() } },
     );
+  }
+
+  // ── Mis logros (vista del asistente) ─────────────────────────────────────
+
+  /**
+   * Hitos del evento con el avance del asistente de esta sesión (uid), para
+   * la pestaña «Mis logros». No se muestra si el admin no la activó ni a
+   * quien cae en el grupo de control (vería sus logros sin la felicitación y
+   * contaminaría la medición). Los logros manuales sin otorgar no revelan
+   * su texto: son sorpresa.
+   */
+  async mine(eventId: string, uid: string) {
+    const hidden = { visible: false as const };
+    const ctx = await this.getContext(eventId);
+    if (!ctx?.config.showToAttendee || !ctx.items.length) return hidden;
+
+    const eu = this.eventUserModel
+      ? await this.eventUserModel
+          .findOne({ eventId, firebaseUID: uid }, { _id: 1, attendeeId: 1 })
+          .lean()
+      : null;
+    const attendeeId = eu?.attendeeId ? String(eu.attendeeId) : null;
+    if (
+      attendeeId &&
+      milestoneHoldout(eventId, attendeeId, ctx.config.holdoutPercent ?? 0)
+    ) {
+      return hidden;
+    }
+
+    const types = new Set(ctx.items.map((i) => i.type));
+    const s = this.states.get(eventId);
+    const now = Date.now();
+    const progress = new Map<MilestoneType, number>();
+
+    const awards = attendeeId
+      ? await this.awardModel
+          .find(
+            { eventId, attendeeId },
+            { milestoneId: 1, value: 1, name: 1, createdAt: 1 },
+          )
+          .lean()
+      : [];
+
+    if (attendeeId) {
+      const tasks: Promise<unknown>[] = [];
+      if (types.has('watchMinutes')) {
+        // Racha en memoria (la lleva onPresence); cortada = 0
+        const st = s?.streaks.get(attendeeId);
+        progress.set(
+          'watchMinutes',
+          st && now - st.lastSeen <= STREAK_GAP_MS
+            ? Math.floor((now - st.since) / 60_000)
+            : 0,
+        );
+      }
+      if (types.has('totalMinutes')) {
+        const h = s?.history?.get(attendeeId);
+        if (h) {
+          progress.set('totalMinutes', Math.floor(h.liveMs / 60_000));
+        } else if (this.viewingSessionModel && eu?._id) {
+          tasks.push(
+            this.viewingSessionModel
+              .aggregate<{ live: number }>([
+                { $match: { eventId, eventUserId: eu._id } },
+                {
+                  $group: {
+                    _id: null,
+                    live: { $sum: '$liveWatchTimeSeconds' },
+                  },
+                },
+              ])
+              .then((r) =>
+                progress.set(
+                  'totalMinutes',
+                  Math.floor((r[0]?.live ?? 0) / 60),
+                ),
+              ),
+          );
+        }
+      }
+      if (types.has('frequentAttendee')) {
+        const cached = s?.frequentChecked.get(attendeeId);
+        if (cached !== undefined) {
+          progress.set('frequentAttendee', cached);
+        } else if (this.eventUserModel && Types.ObjectId.isValid(attendeeId)) {
+          tasks.push(
+            this.eventUserModel
+              .countDocuments({
+                attendeeId: new Types.ObjectId(attendeeId),
+                eventId: { $ne: eventId },
+                status: 'attended',
+              })
+              .then((n) => progress.set('frequentAttendee', n + 1)),
+          );
+        }
+      }
+      if (types.has('pollsAnswered')) {
+        tasks.push(
+          this.pollModel
+            .countDocuments({
+              eventId: Types.ObjectId.isValid(eventId)
+                ? new Types.ObjectId(eventId)
+                : eventId,
+              'responses.orgAttendeeId': attendeeId,
+            })
+            .then((n) => progress.set('pollsAnswered', n)),
+        );
+      }
+      if (types.has('greetingsSent')) {
+        tasks.push(
+          this.greetingModel
+            .countDocuments({ eventId, kind: 'greet', attendeeId })
+            .then((n) => progress.set('greetingsSent', n)),
+        );
+      }
+      await Promise.all(tasks);
+    }
+
+    const got = new Map(awards.map((a) => [a.milestoneId, a]));
+    const items = ctx.items.map((item) => {
+      const a = got.get(item.id);
+      // Tipos con avance medible (los de posición y el manual son sí/no)
+      const current = progress.get(item.type);
+      return {
+        id: item.id,
+        type: item.type,
+        threshold: item.threshold,
+        achieved: !!a,
+        achievedAt: a?.createdAt ?? null,
+        progress: a
+          ? Math.max(item.threshold, a.value ?? item.threshold)
+          : current !== undefined
+            ? Math.min(current, item.threshold)
+            : null,
+        // Felicitación personal del logro conseguido
+        text: a
+          ? renderMilestoneTemplate(
+              item.privateTemplate ||
+                DEFAULT_MILESTONE_TEXTS[item.type].private,
+              {
+                nombre: a.name || 'colega',
+                umbral: item.threshold,
+                valor: a.value,
+              },
+            )
+          : null,
+      };
+    });
+
+    return {
+      visible: true as const,
+      live: ctx.live,
+      accentColor: ctx.config.accentColor ?? null,
+      items,
+    };
   }
 
   // ── Informe ──────────────────────────────────────────────────────────────
