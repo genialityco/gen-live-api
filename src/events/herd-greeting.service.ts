@@ -25,6 +25,7 @@ import {
 } from './herd.service';
 import { HerdGreetingActionDto } from './dtos/herd-greeting-action.dto';
 import { MilestonesService } from './milestones.service';
+import { ContactExchangeService } from './contact-exchange.service';
 
 /** Lo que el backend publicó del asistente en /herd/{eventId}/members/{uid} */
 type MemberGroup = { key: string; label: string; singular?: string };
@@ -89,6 +90,7 @@ export class HerdGreetingService {
     private rtdb: RtdbService,
     private herd: HerdService,
     @Optional() private milestones?: MilestonesService,
+    @Optional() private contacts?: ContactExchangeService,
   ) {}
 
   private async greetingConfig(eventId: string) {
@@ -330,6 +332,13 @@ export class HerdGreetingService {
       greetingId: dto.greetingId,
       at: admin.database.ServerValue.TIMESTAMP,
     });
+    // Saludo + devolución: pueden intercambiar contacto (no bloquea)
+    void this.contacts?.onGreetingReply(
+      eventId,
+      attendeeId,
+      original.attendeeId,
+      group.label,
+    );
     return { ok: true };
   }
 

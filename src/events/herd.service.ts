@@ -118,6 +118,7 @@ export const DEFAULT_HERD_CONFIG: Required<
     cooldownSec: 60,
     minConnected: 3,
     holdoutPercent: 20,
+    contactExchange: false,
   },
 };
 

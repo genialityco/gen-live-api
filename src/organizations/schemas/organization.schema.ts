@@ -116,6 +116,10 @@ export class Organization {
   @Prop({ type: Object })
   registrationForm?: RegistrationForm;
   @Prop({ required: true }) ownerUid: string;
+  // Intercambio de contactos entre colegas: texto de autorización (habeas
+  // data) que acepta el asistente antes de compartir sus datos
+  @Prop({ type: Object })
+  contactExchange?: { consentText?: string };
 }
 export type OrganizationDocument = HydratedDocument<Organization>;
 export const OrganizationSchema = SchemaFactory.createForClass(Organization);
