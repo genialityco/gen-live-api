@@ -9,10 +9,17 @@ import { WaCampaignService } from './wa-campaign.service';
 import { WaWebhookService } from './wa-webhook.service';
 import { WaCampaignController } from './wa-campaign.controller';
 import { WaWebhookController } from './wa-webhook.controller';
+import { WaAutoSendService } from './wa-auto-send.service';
 // Schemas externos que el service necesita para resolver variables
 import { OrgAttendee, OrgAttendeeSchema } from '../organizations/schemas/org-attendee.schema';
 import { Organization, OrganizationSchema } from '../organizations/schemas/organization.schema';
 import { Event, EventSchema } from '../events/schemas/event.schema';
+// Inscritos y sesiones para las audiencias por evento (inscritos / no asistieron)
+import { EventUser, EventUserSchema } from '../events/schemas/event-user.schema';
+import {
+  ViewingSession,
+  ViewingSessionSchema,
+} from '../events/schemas/viewing-session.schema';
 
 @Module({
   imports: [
@@ -23,10 +30,18 @@ import { Event, EventSchema } from '../events/schemas/event.schema';
       { name: OrgAttendee.name, schema: OrgAttendeeSchema },
       { name: Organization.name, schema: OrganizationSchema },
       { name: Event.name, schema: EventSchema },
+      { name: EventUser.name, schema: EventUserSchema },
+      { name: ViewingSession.name, schema: ViewingSessionSchema },
     ]),
   ],
   controllers: [WaCampaignController, WaWebhookController],
-  providers: [WaService, WaTemplateService, WaCampaignService, WaWebhookService],
+  providers: [
+    WaService,
+    WaTemplateService,
+    WaCampaignService,
+    WaWebhookService,
+    WaAutoSendService,
+  ],
   exports: [WaCampaignService, WaTemplateService],
 })
 export class WaCampaignModule {}

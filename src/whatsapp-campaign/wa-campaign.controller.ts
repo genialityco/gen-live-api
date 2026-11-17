@@ -16,6 +16,7 @@ import { WaCampaignService } from './wa-campaign.service';
 import { WaTemplateService } from './wa-template.service';
 import { WaUtmParam } from './schemas/wa-campaign.schema';
 import { WaTemplateComponent } from './schemas/wa-template.schema';
+import type { WaAudience } from './wa-audience';
 
 @Controller('wa-campaign')
 @UseGuards(FirebaseAuthGuard)
@@ -129,6 +130,8 @@ export class WaCampaignController {
       name: string;
       templateId: string;
       utmParams?: WaUtmParam[];
+      audience?: WaAudience;
+      autoSend?: { delayMinutes?: number } | null;
     },
     @Request() req: any,
   ) {

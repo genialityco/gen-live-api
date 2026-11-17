@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
+import { WA_AUDIENCES, type WaAudience } from '../wa-audience';
 
 export type WaCampaignStatus = 'draft' | 'sending' | 'completed' | 'failed' | 'cancelled';
 
@@ -20,6 +21,27 @@ export class WaCampaignStats {
 export class WaUtmParam {
   @Prop({ required: true }) name: string;
   @Prop({ required: true }) value: string;
+}
+
+/**
+ * Envío automático cuando el evento pasa a diferido (grabación disponible).
+ * La campaña queda en `draft` hasta que se dispara; `firedAt` evita que se
+ * envíe dos veces.
+ */
+@Schema({ _id: false })
+export class WaAutoSend {
+  @Prop({ required: true, enum: ['on_replay'], default: 'on_replay' })
+  trigger: 'on_replay';
+
+  /** Minutos a esperar desde que se detecta el evento en diferido */
+  @Prop({ required: true, default: 0 }) delayMinutes: number;
+
+  /** Hora de envío, fijada al detectar el evento en diferido */
+  @Prop({ type: Date, default: null }) dueAt: Date | null;
+
+  @Prop({ type: Date, default: null }) firedAt: Date | null;
+
+  @Prop({ type: String, default: null }) lastError: string | null;
 }
 
 @Schema({ timestamps: true })
@@ -47,6 +69,13 @@ export class WaCampaign {
 
   @Prop({ type: [WaUtmParam], default: null })
   utmParams: WaUtmParam[] | null;
+
+  /** A quién se envía. Las campañas anteriores no lo tienen: org_attendees. */
+  @Prop({ type: String, enum: WA_AUDIENCES, default: 'org_attendees' })
+  audience: WaAudience;
+
+  @Prop({ type: WaAutoSend, default: null })
+  autoSend: WaAutoSend | null;
 
   @Prop({
     required: true,

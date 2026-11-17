@@ -11,6 +11,12 @@ import { WaDelivery, WaDeliveryDocument } from './schemas/wa-delivery.schema';
 import { WaTemplate, WaTemplateDocument, WaTemplateComponent } from './schemas/wa-template.schema';
 import { WaService, MetaMessageComponent } from './wa.service';
 import { GeoipService } from '../geoip/geoip.service';
+import {
+  MAX_AUTO_SEND_DELAY_MIN,
+  WA_AUDIENCES,
+  selectNoShows,
+  type WaAudience,
+} from './wa-audience';
 
 const BATCH_SIZE = 20; // Meta Cloud API: cómodo bien por debajo del límite de 80/s
 
@@ -53,6 +59,10 @@ export class WaCampaignService {
     private readonly eventModel: Model<any>,
     @InjectModel('Organization')
     private readonly orgModel: Model<any>,
+    @InjectModel('EventUser')
+    private readonly eventUserModel: Model<any>,
+    @InjectModel('ViewingSession')
+    private readonly viewingSessionModel: Model<any>,
     private readonly waService: WaService,
     private readonly geoipService: GeoipService,
   ) {}
@@ -79,9 +89,33 @@ export class WaCampaignService {
       name: string;
       templateId: string;
       utmParams?: WaUtmParam[];
+      audience?: WaAudience;
+      /** Si viene, la campaña se envía sola al pasar el evento a diferido */
+      autoSend?: { delayMinutes?: number } | null;
     },
     createdBy: string,
   ): Promise<WaCampaign> {
+    const audience = dto.audience ?? 'org_attendees';
+    if (!WA_AUDIENCES.includes(audience)) {
+      throw new BadRequestException(`Audiencia inválida: ${audience}`);
+    }
+    let autoSend: Record<string, unknown> | null = null;
+    if (dto.autoSend) {
+      const delay = Number(dto.autoSend.delayMinutes ?? 0);
+      if (!Number.isInteger(delay) || delay < 0 || delay > MAX_AUTO_SEND_DELAY_MIN) {
+        throw new BadRequestException(
+          `La espera debe ser un número entero de minutos entre 0 y ${MAX_AUTO_SEND_DELAY_MIN}`,
+        );
+      }
+      autoSend = {
+        trigger: 'on_replay',
+        delayMinutes: delay,
+        dueAt: null,
+        firedAt: null,
+        lastError: null,
+      };
+    }
+
     const template = await this.templateModel.findById(dto.templateId).lean();
     if (!template) throw new NotFoundException('Template no encontrado');
     if (template.status !== 'approved') {
@@ -94,6 +128,8 @@ export class WaCampaignService {
       name: dto.name,
       templateId: new Types.ObjectId(dto.templateId),
       utmParams: dto.utmParams ?? null,
+      audience,
+      autoSend,
       createdBy,
     });
   }
@@ -138,24 +174,10 @@ export class WaCampaignService {
 
     const { telefonoFieldId, codigoPaisFieldId } = this.getOrgPhoneFieldIds(org);
 
-    // Buscar attendees con teléfono — priorizar registrationData si la org tiene esos campos
-    let rawAttendees: any[];
-    if (telefonoFieldId) {
-      rawAttendees = await this.attendeeModel
-        .find({
-          organizationId: campaign.orgId.toString(),
-          [`registrationData.${telefonoFieldId}`]: { $exists: true, $nin: [null, ''] },
-        })
-        .lean();
-    } else {
-      rawAttendees = await this.attendeeModel
-        .find({
-          organizationId: campaign.orgId.toString(),
-          phone: { $nin: [null, ''] },
-          phoneStatus: 'valid',
-        })
-        .lean();
-    }
+    // Attendees con teléfono de la audiencia de la campaña
+    const rawAttendees: any[] = await this.attendeeModel
+      .find(await this.buildAttendeeFilter(campaign, telefonoFieldId))
+      .lean();
 
     // Resolver teléfono por attendee y descartar los inválidos
     const deliveryDocs: any[] = [];
@@ -176,7 +198,11 @@ export class WaCampaignService {
     }
 
     if (deliveryDocs.length === 0) {
-      throw new BadRequestException('No hay asistentes con teléfono válido para enviar');
+      throw new BadRequestException(
+        campaign.audience === 'event_no_show'
+          ? 'No hay inscritos sin asistir con teléfono válido para enviar'
+          : 'No hay asistentes con teléfono válido para enviar',
+      );
     }
 
     await this.deliveryModel.insertMany(deliveryDocs, { ordered: false });
@@ -472,6 +498,75 @@ export class WaCampaignService {
   }
 
   /**
+   * Filtro de OrgAttendee para la audiencia de la campaña: asistentes de la
+   * org con teléfono (del formulario si la org tiene ese campo, si no
+   * `phone` validado) y, para audiencias de evento, solo los inscritos que
+   * correspondan.
+   */
+  private async buildAttendeeFilter(
+    campaign: { orgId: Types.ObjectId; eventId: Types.ObjectId; audience?: WaAudience },
+    telefonoFieldId: string | null,
+  ): Promise<Record<string, any>> {
+    const filter: Record<string, any> = telefonoFieldId
+      ? {
+          organizationId: campaign.orgId.toString(),
+          [`registrationData.${telefonoFieldId}`]: { $exists: true, $nin: [null, ''] },
+        }
+      : {
+          organizationId: campaign.orgId.toString(),
+          phone: { $nin: [null, ''] },
+          phoneStatus: 'valid',
+        };
+
+    const audience = campaign.audience ?? 'org_attendees';
+    if (audience === 'org_attendees') {
+      // PENDIENTE (corrección de bajas): cuando el teléfono sale del
+      // formulario (telefonoFieldId), este filtro no excluye a quien se dio de
+      // baja (phoneStatus: 'opted_out', que marca el webhook con el error
+      // 131026 de Meta). Falta agregar aquí también
+      // `filter.phoneStatus = { $ne: 'opted_out' }`, como en las audiencias
+      // de evento de abajo.
+      return filter;
+    }
+
+    filter._id = {
+      $in: await this.eventAudienceAttendeeIds(campaign.eventId.toString(), audience),
+    };
+    // Con teléfono del formulario hay que excluir las bajas explícitamente;
+    // con `phone` ya lo hace phoneStatus: 'valid'.
+    if (telefonoFieldId) filter.phoneStatus = { $ne: 'opted_out' };
+    return filter;
+  }
+
+  /** OrgAttendee ids de los inscritos al evento (todos o los que no lo vieron) */
+  private async eventAudienceAttendeeIds(
+    eventId: string,
+    audience: Exclude<WaAudience, 'org_attendees'>,
+  ): Promise<Types.ObjectId[]> {
+    const eventUsers = await this.eventUserModel
+      .find({ eventId, status: { $ne: 'cancelled' } }, { _id: 1, attendeeId: 1, status: 1 })
+      .lean<any[]>();
+
+    let ids: unknown[];
+    if (audience === 'event_registered') {
+      ids = eventUsers.map((u) => u.attendeeId);
+    } else {
+      // Quien tuvo alguna sesión en vivo o en diferido ya vio el evento
+      const watched = await this.viewingSessionModel.distinct('eventUserId', {
+        eventId,
+        $or: [{ wasLiveDuringSession: true }, { wasReplayDuringSession: true }],
+      });
+      ids = selectNoShows(eventUsers, watched);
+    }
+
+    // Hay EventUser antiguos con attendeeId guardado como texto
+    return ids
+      .map((id) => String(id))
+      .filter((id) => Types.ObjectId.isValid(id))
+      .map((id) => new Types.ObjectId(id));
+  }
+
+  /**
    * Construye el número de teléfono E.164 (sin '+') a partir de registrationData.
    * Combina codigo_pais_* (ej: "+57") con telefono_* (ej: "3001234567") → "573001234567".
    * Si el telefono ya incluye el código (empieza con '+' o con los dígitos del código), no lo duplica.
@@ -519,19 +614,7 @@ export class WaCampaignService {
 
     const { page = 1, limit = 50 } = opts;
 
-    let filter: any;
-    if (telefonoFieldId) {
-      filter = {
-        organizationId: campaign.orgId.toString(),
-        [`registrationData.${telefonoFieldId}`]: { $exists: true, $nin: [null, ''] },
-      };
-    } else {
-      filter = {
-        organizationId: campaign.orgId.toString(),
-        phone: { $nin: [null, ''] },
-        phoneStatus: 'valid',
-      };
-    }
+    const filter = await this.buildAttendeeFilter(campaign, telefonoFieldId);
 
     const [rawData, total] = await Promise.all([
       this.attendeeModel
