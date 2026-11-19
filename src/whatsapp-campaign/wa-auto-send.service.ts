@@ -8,13 +8,15 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { WaCampaign, WaCampaignDocument } from './schemas/wa-campaign.schema';
 import { WaCampaignService } from './wa-campaign.service';
+import { WaAutoRuleService } from './wa-auto-rule.service';
 import { AUTO_SEND_TICK_MS, autoSendStep } from './wa-audience';
 
 /**
  * Envío automático de campañas de WhatsApp al pasar el evento a diferido
  * (por ejemplo, invitar a ver la grabación a los inscritos que no asistieron).
  *
- * Cada minuto revisa las campañas en `draft` con `autoSend` sin disparar.
+ * Cada minuto crea las campañas de las reglas automáticas (WaAutoRuleService)
+ * y revisa las campañas en `draft` con `autoSend` sin disparar.
  * La hora de envío y el disparo se guardan en Mongo, así que un reinicio del
  * servidor no pierde ni repite envíos; con varias instancias, el disparo se
  * reclama con una actualización atómica sobre `autoSend.firedAt`.
@@ -31,6 +33,7 @@ export class WaAutoSendService implements OnModuleInit, OnModuleDestroy {
     @InjectModel('Event')
     private readonly eventModel: Model<any>,
     private readonly campaignService: WaCampaignService,
+    private readonly autoRuleService: WaAutoRuleService,
   ) {}
 
   onModuleInit() {
@@ -47,6 +50,10 @@ export class WaAutoSendService implements OnModuleInit, OnModuleDestroy {
     if (this.running) return;
     this.running = true;
     try {
+      // Primero, crear las campañas de las reglas automáticas de cada
+      // organización en los eventos que aún no las tienen
+      await this.autoRuleService.materialize();
+
       const pending = await this.campaignModel
         .find(
           {
