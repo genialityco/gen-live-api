@@ -87,3 +87,48 @@ export function autoSendStep(
   }
   return now >= state.dueAt ? { kind: 'fire' } : { kind: 'wait' };
 }
+
+export interface RuleEventLite {
+  _id: unknown;
+  hidden?: boolean;
+  schedule?: { startsAt?: Date | null } | null;
+}
+
+export interface RuleCampaignLite {
+  eventId: unknown;
+  templateId: unknown;
+  autoRuleId?: unknown;
+  status: string;
+}
+
+/**
+ * Eventos que todavía necesitan la campaña de una regla automática.
+ *
+ * Se omite el evento si:
+ * - está oculto o empieza antes de `appliesFrom` (la regla no es retroactiva);
+ * - ya tiene una campaña de esta regla, en cualquier estado: si alguien la
+ *   canceló en ese evento, no se vuelve a crear;
+ * - ya tiene una campaña manual con el mismo template que no fue cancelada,
+ *   para no enviar dos veces el mismo mensaje.
+ */
+export function eventsNeedingRuleCampaign(
+  rule: { _id: unknown; templateId: unknown; appliesFrom: Date },
+  events: RuleEventLite[],
+  campaigns: RuleCampaignLite[],
+): string[] {
+  const covered = new Set<string>();
+  for (const c of campaigns) {
+    const sameRule = c.autoRuleId != null && String(c.autoRuleId) === String(rule._id);
+    const sameTemplate =
+      String(c.templateId) === String(rule.templateId) && c.status !== 'cancelled';
+    if (sameRule || sameTemplate) covered.add(String(c.eventId));
+  }
+  return events
+    .filter((e) => !e.hidden)
+    .filter((e) => {
+      const startsAt = e.schedule?.startsAt;
+      return !!startsAt && new Date(startsAt) >= rule.appliesFrom;
+    })
+    .map((e) => String(e._id))
+    .filter((id) => !covered.has(id));
+}

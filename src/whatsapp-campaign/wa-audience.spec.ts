@@ -1,5 +1,9 @@
 import { Types } from 'mongoose';
-import { autoSendStep, selectNoShows } from './wa-audience';
+import {
+  autoSendStep,
+  eventsNeedingRuleCampaign,
+  selectNoShows,
+} from './wa-audience';
 
 describe('selectNoShows', () => {
   const a = new Types.ObjectId();
@@ -73,5 +77,48 @@ describe('autoSendStep', () => {
         now,
       ),
     ).toEqual({ kind: 'wait' });
+  });
+});
+
+describe('eventsNeedingRuleCampaign', () => {
+  const ruleId = new Types.ObjectId();
+  const templateId = new Types.ObjectId();
+  const otherTemplate = new Types.ObjectId();
+  const rule = { _id: ruleId, templateId, appliesFrom: new Date('2026-11-20T00:00:00Z') };
+  const ev = (id: string, startsAt: string | null, hidden = false) => ({
+    _id: id,
+    hidden,
+    schedule: startsAt ? { startsAt: new Date(startsAt) } : null,
+  });
+
+  it('incluye eventos desde appliesFrom y omite anteriores, ocultos o sin fecha', () => {
+    const events = [
+      ev('e1', '2026-11-25T00:00:00Z'),
+      ev('e2', '2026-11-10T00:00:00Z'), // antes de la regla
+      ev('e3', '2026-11-26T00:00:00Z', true), // oculto
+      ev('e4', null), // sin fecha
+    ];
+    expect(eventsNeedingRuleCampaign(rule, events, [])).toEqual(['e1']);
+  });
+
+  it('no recrea la campaña de la regla aunque se haya cancelado', () => {
+    const events = [ev('e1', '2026-11-25T00:00:00Z')];
+    const campaigns = [{ eventId: 'e1', templateId, autoRuleId: ruleId, status: 'cancelled' }];
+    expect(eventsNeedingRuleCampaign(rule, events, campaigns)).toEqual([]);
+  });
+
+  it('omite eventos con una campaña manual del mismo template, salvo si se canceló', () => {
+    const events = [ev('e1', '2026-11-25T00:00:00Z'), ev('e2', '2026-11-26T00:00:00Z')];
+    const campaigns = [
+      { eventId: 'e1', templateId, autoRuleId: null, status: 'completed' },
+      { eventId: 'e2', templateId, autoRuleId: null, status: 'cancelled' },
+    ];
+    expect(eventsNeedingRuleCampaign(rule, events, campaigns)).toEqual(['e2']);
+  });
+
+  it('no cuenta campañas manuales de otro template', () => {
+    const events = [ev('e1', '2026-11-25T00:00:00Z')];
+    const campaigns = [{ eventId: 'e1', templateId: otherTemplate, autoRuleId: null, status: 'draft' }];
+    expect(eventsNeedingRuleCampaign(rule, events, campaigns)).toEqual(['e1']);
   });
 });

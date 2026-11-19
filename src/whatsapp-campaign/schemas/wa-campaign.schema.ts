@@ -77,6 +77,10 @@ export class WaCampaign {
   @Prop({ type: WaAutoSend, default: null })
   autoSend: WaAutoSend | null;
 
+  /** Regla de la organización que creó esta campaña (null si se creó a mano) */
+  @Prop({ type: Types.ObjectId, ref: 'WaAutoRule', default: null })
+  autoRuleId: Types.ObjectId | null;
+
   @Prop({
     required: true,
     enum: ['draft', 'sending', 'completed', 'failed', 'cancelled'],
@@ -99,3 +103,9 @@ export const WaCampaignSchema = SchemaFactory.createForClass(WaCampaign);
 
 WaCampaignSchema.index({ orgId: 1, eventId: 1 });
 WaCampaignSchema.index({ status: 1 });
+// Una sola campaña por evento y regla automática, aunque varias instancias
+// del servidor revisen las reglas al mismo tiempo
+WaCampaignSchema.index(
+  { eventId: 1, autoRuleId: 1 },
+  { unique: true, partialFilterExpression: { autoRuleId: { $type: 'objectId' } } },
+);
