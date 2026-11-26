@@ -283,7 +283,7 @@ export class EmailSendService {
         .lean<EventDocument>();
       if (event) {
         const frontendUrl =
-          this.configService.get<string>('FRONTEND_URL') ?? '';
+          this.configService.get<string>('FRONTEND_URL') || 'https://genlive.geniality.com.co';
         icalContent = this.buildIcal(event, org?.domainSlug ?? '', org?.name ?? '', frontendUrl);
       }
     }

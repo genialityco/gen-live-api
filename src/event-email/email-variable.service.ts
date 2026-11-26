@@ -39,7 +39,7 @@ export class EmailVariableService {
     private readonly configService: ConfigService,
   ) {
     this.frontendUrl =
-      this.configService.get<string>('FRONTEND_URL') || 'https://app.gen.live';
+      this.configService.get<string>('FRONTEND_URL') || 'https://genlive.geniality.com.co';
   }
 
   /**
