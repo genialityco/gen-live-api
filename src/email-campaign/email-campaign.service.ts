@@ -451,7 +451,7 @@ export class EmailCampaignService implements OnModuleInit {
       const compiledBody = Handlebars.compile(campaign.templateSnapshot.body);
 
       // Generar iCal una sola vez para toda la campaña
-      const frontendUrl = this.configService.get<string>('FRONTEND_URL') ?? '';
+      const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'https://genlive.geniality.com.co';
       const event = await this.eventModel.findById(campaign.eventId).lean<EventDocument>();
       const icalContent = event
         ? this.buildIcal(
