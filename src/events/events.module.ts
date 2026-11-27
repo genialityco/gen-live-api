@@ -46,6 +46,11 @@ import {
   MessageDeliverySchema,
 } from './schemas/message-delivery.schema';
 import { MessageDeliveryService } from './message-delivery.service';
+import { VodMirrorService } from './vod-mirror.service';
+import {
+  VodMirrorJob,
+  VodMirrorJobSchema,
+} from './schemas/vod-mirror-job.schema';
 import {
   NetworkBlockReport,
   NetworkBlockReportSchema,
@@ -87,6 +92,7 @@ import { Logger } from '@nestjs/common';
       { name: HerdAnnouncement.name, schema: HerdAnnouncementSchema },
       { name: MilestoneAward.name, schema: MilestoneAwardSchema },
       { name: MessageDelivery.name, schema: MessageDeliverySchema },
+      { name: VodMirrorJob.name, schema: VodMirrorJobSchema },
     ]),
     RtdbModule,
     forwardRef(() => OrganizationsModule),
@@ -107,6 +113,7 @@ import { Logger } from '@nestjs/common';
     MilestonesService,
     EngagementAnalysisService,
     MessageDeliveryService,
+    VodMirrorService,
   ],
   controllers: [EventsController, EventUserController, PollController],
   exports: [

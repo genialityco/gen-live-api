@@ -38,6 +38,8 @@ import { HerdGreetingService } from './herd-greeting.service';
 import { HerdGreetingActionDto } from './dtos/herd-greeting-action.dto';
 import { RecordDeliveryDto } from './dtos/record-delivery.dto';
 import { MessageDeliveryService } from './message-delivery.service';
+import { VodMirrorService } from './vod-mirror.service';
+import { UpdateBunnyReplayConfigDto } from './dtos/update-bunny-replay-config.dto';
 import { MilestonesService } from './milestones.service';
 import { EngagementAnalysisService } from './engagement-analysis.service';
 import {
@@ -67,6 +69,7 @@ export class EventsController {
     private milestones: MilestonesService,
     private engagement: EngagementAnalysisService,
     private deliveries: MessageDeliveryService,
+    private vodMirror: VodMirrorService,
   ) {}
 
   // ENDPOINTS PÚBLICOS (sin autenticación)
@@ -276,6 +279,31 @@ export class EventsController {
     @Body() dto: UpdateStreamsDto,
   ) {
     return this.svc.updateStreams(eventId, dto.streams);
+  }
+
+  // Activa/desactiva la copia de la grabación del vivo (Vimeo) a Bunny como
+  // fuente por defecto de la repetición. Desactivada por defecto.
+  @Patch(':eventId/bunny-replay-config')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async updateBunnyReplayConfig(
+    @Param('eventId') eventId: string,
+    @Body() dto: UpdateBunnyReplayConfigDto,
+  ) {
+    return this.vodMirror.setEnabled(eventId, dto.enabled);
+  }
+
+  // Copia de la grabación del vivo (Vimeo) a Bunny: estado por fase
+  @Get(':eventId/vod-mirror')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async getVodMirror(@Param('eventId') eventId: string) {
+    return this.vodMirror.getStatus(eventId);
+  }
+
+  // Reintenta las copias fallidas (o programa la del vivo actual)
+  @Post(':eventId/vod-mirror/retry')
+  @UseGuards(FirebaseAuthGuard, EventOwnerGuard)
+  async retryVodMirror(@Param('eventId') eventId: string) {
+    return this.vodMirror.retry(eventId);
   }
 
   // Toggle de "modo emergencia" (dueñ@ del evento) — ver plan modo emergencia.

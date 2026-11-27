@@ -46,6 +46,15 @@ export interface EventCertificatesConfig {
   certEventId?: string;
 }
 
+/**
+ * Copia de la grabación del vivo (Vimeo) a Bunny para usarla como fuente
+ * por defecto de la repetición (ver VodMirrorService). Desactivada si el
+ * campo no existe.
+ */
+export interface EventBunnyReplayConfig {
+  enabled: boolean;
+}
+
 export type HerdPosition =
   | 'top-left'
   | 'top-center'
@@ -286,6 +295,9 @@ export class Event {
 
   @Prop({ type: Object })
   certificatesConfig?: EventCertificatesConfig;
+
+  @Prop({ type: Object })
+  bunnyReplayConfig?: EventBunnyReplayConfig;
 
   @Prop({ type: Object })
   herdConfig?: EventHerdConfig;

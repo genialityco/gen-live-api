@@ -16,6 +16,8 @@ import { RtdbModule } from 'src/rtdb/rtdb.module';
 import { EventsModule } from 'src/events/events.module';
 import { MuxService } from './mux.service';
 import { CloudflareStreamService } from './cloudflare-stream.service';
+import { VimeoService } from './vimeo.service';
+import { BunnyStreamService } from './bunny-stream.service';
 
 @Module({
   imports: [
@@ -32,6 +34,8 @@ import { CloudflareStreamService } from './cloudflare-stream.service';
     LiveConfigService,
     MuxService,
     CloudflareStreamService,
+    VimeoService,
+    BunnyStreamService,
     MediaLibraryService,
   ],
   controllers: [LivekitController, LiveController, MediaLibraryController],
@@ -41,6 +45,8 @@ import { CloudflareStreamService } from './cloudflare-stream.service';
     LiveConfigService,
     MuxService,
     CloudflareStreamService,
+    VimeoService,
+    BunnyStreamService,
     MediaLibraryService,
   ],
 })

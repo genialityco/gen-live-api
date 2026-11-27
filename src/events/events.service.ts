@@ -11,6 +11,8 @@ import {
   ForbiddenException,
   ConflictException,
   OnModuleInit,
+  Inject as InjectProvider,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -43,6 +45,7 @@ import { EventEmailTemplateService } from '../event-email/event-email-template.s
 import { EmailCampaignService } from '../email-campaign/email-campaign.service';
 import { CertificatesService } from '../certificates/certificates.service';
 import { liveWindowUpdate } from './live-window';
+import { VodMirrorService } from './vod-mirror.service';
 
 function normalizeByType(value: any, type: FormFieldType | undefined) {
   if (value === null || value === undefined) return value;
@@ -197,6 +200,8 @@ export class EventsService implements OnModuleInit {
     private emailTemplateService: EventEmailTemplateService,
     private emailCampaignService: EmailCampaignService,
     private certificatesService: CertificatesService,
+    @InjectProvider(forwardRef(() => VodMirrorService))
+    private vodMirror: VodMirrorService,
   ) {
     // Configurar watcher con servicio de métricas para evitar dependencia circular
     this.watcher.setViewingMetricsService(this.metricsService);
@@ -671,7 +676,86 @@ export class EventsService implements OnModuleInit {
       }
     }
 
+    // Vimeo: copiar la grabación del vivo a Bunny y, cuando esté lista,
+    // dejarla como fuente por defecto de la repetición (fire-and-forget: la
+    // grabación tarda de minutos a horas; ver VodMirrorService).
+    if (status === 'ended' || status === 'replay') {
+      void this.vodMirror.enqueue(eventId, ev.slug);
+    }
+
     return { ok: true, eventId, status };
+  }
+
+  /**
+   * Deja `url` como fuente por defecto de la repetición: primera de
+   * `event.streams` (la que el reproductor elige) y también `event.stream`.
+   * Las demás fuentes se conservan detrás como respaldo (p. ej. el video de
+   * Vimeo del vivo); si `streams` estaba vacío, la fuente legacy de
+   * `event.stream` pasa a ser ese respaldo.
+   *
+   * Solo aplica en Finalizado/Repetición, para no pisar la URL del vivo. No
+   * reemplaza una fuente del mismo proveedor puesta a mano: solo las que
+   * estén en `replaceableUrls` (copias automáticas anteriores). Devuelve si
+   * se aplicó.
+   */
+  async setDefaultReplaySource(
+    eventId: string,
+    provider: string,
+    url: string,
+    replaceableUrls: string[] = [],
+  ): Promise<boolean> {
+    const replayPhases = ['ended', 'replay'];
+    const ev = await this.model
+      .findById(eventId, { slug: 1, status: 1, stream: 1, streams: 1 })
+      .lean();
+    if (!ev || !replayPhases.includes(ev.status)) return false;
+
+    const current = ev.streams ?? [];
+    const manual = current.find(
+      (s) =>
+        s.provider === provider &&
+        s.url &&
+        s.url !== url &&
+        !replaceableUrls.includes(s.url),
+    );
+    if (manual) {
+      this.logger.warn(
+        `[replay-source] ${ev.slug}: ya hay una fuente ${provider} puesta a mano (${manual.url}); no se reemplaza por ${url}`,
+      );
+      return false;
+    }
+
+    const others = current.filter((s) => s.provider !== provider && s.url);
+    if (
+      others.length === 0 &&
+      ev.stream?.url &&
+      ev.stream.provider !== provider
+    ) {
+      others.push({
+        provider: ev.stream.provider || 'default',
+        url: ev.stream.url,
+      });
+    }
+
+    const updated = await this.model
+      .findOneAndUpdate(
+        { _id: eventId, status: { $in: replayPhases } },
+        {
+          $set: {
+            streams: [{ provider, url }, ...others],
+            'stream.provider': provider,
+            'stream.url': url,
+          },
+        },
+        { new: true },
+      )
+      .lean();
+    if (!updated) return false;
+    void this.mirrorEmergencyCache(updated);
+    this.logger.log(
+      `[replay-source] ${ev.slug}: ${provider} es ahora la fuente por defecto (${url})`,
+    );
+    return true;
   }
 
   /**
@@ -1001,6 +1085,8 @@ export class EventsService implements OnModuleInit {
       .findByIdAndUpdate(eventId, { streams }, { new: true })
       .lean();
     if (!ev) throw new NotFoundException('Event not found');
+    // El modo emergencia usa una sola fuente (Bunny si existe en repetición).
+    void this.mirrorEmergencyCache(ev);
 
     const firstProvider = streams[0]?.provider;
     const firstUrl = streams[0]?.url?.trim();
@@ -1096,13 +1182,39 @@ export class EventsService implements OnModuleInit {
    * Re-lee el doc completo (en vez de recibir un delta) para evitar que
    * distintos call-sites pisen campos entre sí con snapshots parciales.
    */
+  /**
+   * Fuente única del evento para quien no maneja la lista de fuentes (modo
+   * emergencia): en Finalizado/Repetición, la de Bunny si existe (es siempre
+   * la principal de la repetición, igual que en el reproductor del
+   * asistente); si no, `event.stream`.
+   */
+  static primaryReplaySource(
+    ev: Pick<EventDocument, 'status' | 'stream' | 'streams'>,
+  ): { provider?: string; url?: string } | null {
+    if (ev.status === 'ended' || ev.status === 'replay') {
+      const bunny = ev.streams?.find(
+        (s) => s.provider?.toLowerCase() === 'bunny' && s.url,
+      );
+      if (bunny) return { provider: bunny.provider, url: bunny.url };
+    }
+    return ev.stream?.url ? ev.stream : null;
+  }
+
   private async mirrorEmergencyCache(
     ev: Pick<
       EventDocument,
-      '_id' | 'slug' | 'title' | 'status' | 'stream' | 'branding' | 'orgId'
+      | '_id'
+      | 'slug'
+      | 'title'
+      | 'status'
+      | 'stream'
+      | 'streams'
+      | 'branding'
+      | 'orgId'
     >,
   ) {
     if (!ev.slug) return;
+    const replaySource = EventsService.primaryReplaySource(ev);
     try {
       const org = await this.orgModel
         .findById(ev.orgId, { domainSlug: 1, branding: 1 })
@@ -1122,8 +1234,8 @@ export class EventsService implements OnModuleInit {
         title: ev.title,
         status: ev.status,
         playbackHlsUrl,
-        streamUrl: ev.stream?.url ?? null,
-        streamProvider: ev.stream?.provider ?? null,
+        streamUrl: replaySource?.url ?? null,
+        streamProvider: replaySource?.provider ?? null,
         orgBranding: org.branding ?? null,
         eventBranding: ev.branding ?? null,
       });
