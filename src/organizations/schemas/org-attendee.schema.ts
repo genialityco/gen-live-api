@@ -51,7 +51,21 @@ export class OrgAttendee extends Document {
 
   @Prop({ type: String, default: null })
   emailSuppressReason: string | null;
+
+  // Tarjeta de contacto que el asistente comparte con los colegas que acepte
+  // (intercambio de contactos del saludo entre colegas). Sin tarjeta no
+  // comparte nada; borrarla retira la autorización con todos.
+  @Prop({ type: Object, default: null })
+  contactCard?: ContactCard | null;
 }
+
+export type ContactCard = {
+  email?: string;
+  whatsapp?: string; // internacional sin +, ej: 573001234567
+  note?: string;
+  consentAt: Date;
+  consentText: string; // texto de autorización que aceptó
+};
 
 export const OrgAttendeeSchema = SchemaFactory.createForClass(OrgAttendee);
 

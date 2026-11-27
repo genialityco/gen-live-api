@@ -244,6 +244,11 @@ class HerdGreetingDto {
   @Min(0)
   @Max(90)
   holdoutPercent?: number;
+
+  // Intercambio de contactos entre quienes se saludan
+  @IsOptional()
+  @IsBoolean()
+  contactExchange?: boolean;
 }
 
 export class UpdateHerdConfigDto {

@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
+import { WA_AUDIENCES, type WaAudience } from '../wa-audience';
 
 export type WaCampaignStatus = 'draft' | 'sending' | 'completed' | 'failed' | 'cancelled';
 
@@ -20,6 +21,27 @@ export class WaCampaignStats {
 export class WaUtmParam {
   @Prop({ required: true }) name: string;
   @Prop({ required: true }) value: string;
+}
+
+/**
+ * Envío automático cuando el evento pasa a diferido (grabación disponible).
+ * La campaña queda en `draft` hasta que se dispara; `firedAt` evita que se
+ * envíe dos veces.
+ */
+@Schema({ _id: false })
+export class WaAutoSend {
+  @Prop({ required: true, enum: ['on_replay'], default: 'on_replay' })
+  trigger: 'on_replay';
+
+  /** Minutos a esperar desde que se detecta el evento en diferido */
+  @Prop({ required: true, default: 0 }) delayMinutes: number;
+
+  /** Hora de envío, fijada al detectar el evento en diferido */
+  @Prop({ type: Date, default: null }) dueAt: Date | null;
+
+  @Prop({ type: Date, default: null }) firedAt: Date | null;
+
+  @Prop({ type: String, default: null }) lastError: string | null;
 }
 
 @Schema({ timestamps: true })
@@ -48,6 +70,17 @@ export class WaCampaign {
   @Prop({ type: [WaUtmParam], default: null })
   utmParams: WaUtmParam[] | null;
 
+  /** A quién se envía. Las campañas anteriores no lo tienen: org_attendees. */
+  @Prop({ type: String, enum: WA_AUDIENCES, default: 'org_attendees' })
+  audience: WaAudience;
+
+  @Prop({ type: WaAutoSend, default: null })
+  autoSend: WaAutoSend | null;
+
+  /** Regla de la organización que creó esta campaña (null si se creó a mano) */
+  @Prop({ type: Types.ObjectId, ref: 'WaAutoRule', default: null })
+  autoRuleId: Types.ObjectId | null;
+
   @Prop({
     required: true,
     enum: ['draft', 'sending', 'completed', 'failed', 'cancelled'],
@@ -70,3 +103,9 @@ export const WaCampaignSchema = SchemaFactory.createForClass(WaCampaign);
 
 WaCampaignSchema.index({ orgId: 1, eventId: 1 });
 WaCampaignSchema.index({ status: 1 });
+// Una sola campaña por evento y regla automática, aunque varias instancias
+// del servidor revisen las reglas al mismo tiempo
+WaCampaignSchema.index(
+  { eventId: 1, autoRuleId: 1 },
+  { unique: true, partialFilterExpression: { autoRuleId: { $type: 'objectId' } } },
+);

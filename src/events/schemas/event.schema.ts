@@ -163,6 +163,9 @@ export interface EventHerdConfig {
     // % de asistentes (con mensajes) que al azar no ven el botón: compara su
     // permanencia contra quienes sí lo ven (0 = sin experimento)
     holdoutPercent?: number;
+    // Quienes se saludan (saludo + devolución) pueden intercambiar contacto
+    // con doble consentimiento (ver ContactExchangeService)
+    contactExchange?: boolean;
   };
 }
 

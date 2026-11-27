@@ -46,6 +46,12 @@ import {
   MessageDeliverySchema,
 } from './schemas/message-delivery.schema';
 import { MessageDeliveryService } from './message-delivery.service';
+import {
+  ContactExchange,
+  ContactExchangeSchema,
+} from './schemas/contact-exchange.schema';
+import { ContactExchangeService } from './contact-exchange.service';
+import { ContactExchangeController } from './contact-exchange.controller';
 import { VodMirrorService } from './vod-mirror.service';
 import {
   VodMirrorJob,
@@ -92,6 +98,7 @@ import { Logger } from '@nestjs/common';
       { name: HerdAnnouncement.name, schema: HerdAnnouncementSchema },
       { name: MilestoneAward.name, schema: MilestoneAwardSchema },
       { name: MessageDelivery.name, schema: MessageDeliverySchema },
+      { name: ContactExchange.name, schema: ContactExchangeSchema },
       { name: VodMirrorJob.name, schema: VodMirrorJobSchema },
     ]),
     RtdbModule,
@@ -113,9 +120,15 @@ import { Logger } from '@nestjs/common';
     MilestonesService,
     EngagementAnalysisService,
     MessageDeliveryService,
+    ContactExchangeService,
     VodMirrorService,
   ],
-  controllers: [EventsController, EventUserController, PollController],
+  controllers: [
+    EventsController,
+    EventUserController,
+    PollController,
+    ContactExchangeController,
+  ],
   exports: [
     EventsService,
     EventUserService,

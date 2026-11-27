@@ -14,8 +14,10 @@ import {
 import { FirebaseAuthGuard } from '../common/guards/firebase-auth.guard';
 import { WaCampaignService } from './wa-campaign.service';
 import { WaTemplateService } from './wa-template.service';
+import { WaAutoRuleService, type WaAutoRuleInput } from './wa-auto-rule.service';
 import { WaUtmParam } from './schemas/wa-campaign.schema';
 import { WaTemplateComponent } from './schemas/wa-template.schema';
+import type { WaAudience } from './wa-audience';
 
 @Controller('wa-campaign')
 @UseGuards(FirebaseAuthGuard)
@@ -23,7 +25,36 @@ export class WaCampaignController {
   constructor(
     private readonly campaignService: WaCampaignService,
     private readonly templateService: WaTemplateService,
+    private readonly autoRuleService: WaAutoRuleService,
   ) {}
+
+  // ─── Reglas automáticas (por organización) ────────────────────────────────
+  // Declaradas antes de las rutas `:id` para que no las capturen.
+
+  @Get('auto-rules')
+  listAutoRules(@Query('orgId') orgId: string) {
+    return this.autoRuleService.findAll(orgId);
+  }
+
+  @Post('auto-rules')
+  createAutoRule(
+    @Body() body: WaAutoRuleInput & { orgId: string },
+    @Request() req: any,
+  ) {
+    const { orgId, ...input } = body;
+    return this.autoRuleService.create(orgId, input, req.user.uid);
+  }
+
+  @Patch('auto-rules/:id')
+  updateAutoRule(@Param('id') id: string, @Body() body: WaAutoRuleInput) {
+    return this.autoRuleService.update(id, body);
+  }
+
+  @Delete('auto-rules/:id')
+  @HttpCode(204)
+  deleteAutoRule(@Param('id') id: string) {
+    return this.autoRuleService.delete(id);
+  }
 
   // ─── Templates ────────────────────────────────────────────────────────────
 
@@ -129,6 +160,8 @@ export class WaCampaignController {
       name: string;
       templateId: string;
       utmParams?: WaUtmParam[];
+      audience?: WaAudience;
+      autoSend?: { delayMinutes?: number } | null;
     },
     @Request() req: any,
   ) {
